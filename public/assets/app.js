@@ -1,0 +1,744 @@
+// BioPicker front end — © 2026 ePerf
+const $ = (s, el = document) => el.querySelector(s);
+const main = $("#main");
+
+// ---------- tiny DOM helper ----------
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "class") el.className = v;
+    else if (k === "value") el.value = v;
+    else if (k === "checked") el.checked = !!v;
+    else if (k === "html") el.innerHTML = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) el.append(c.nodeType ? c : document.createTextNode(String(c)));
+  return el;
+}
+
+function toast(msg, err = false) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "show" + (err ? " err" : "");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => (t.className = ""), err ? 6000 : 2800);
+}
+
+async function api(method, url, body, isForm) {
+  const r = await fetch(url, {
+    method,
+    headers: isForm || !body ? {} : { "Content-Type": "application/json" },
+    body: isForm ? body : body ? JSON.stringify(body) : undefined,
+  });
+  const ct = r.headers.get("content-type") || "";
+  const data = ct.includes("json") ? await r.json() : await r.blob();
+  if (r.status === 401 && data?.login) {
+    showLogin();
+    throw new Error("Please enter the passcode.");
+  }
+  if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+  return data;
+}
+
+// ---------- state ----------
+let P = null; // current project
+let step = "person";
+let health = { ai: true };
+let voices = null;
+let scriptTab = "short";
+const STEPS = [
+  ["person", "The person"],
+  ["media", "Photos & documents"],
+  ["timeline", "Timeline & places"],
+  ["interview", "AI interview"],
+  ["history", "History overlay"],
+  ["style", "Style, length & voice"],
+  ["script", "Script & media"],
+  ["render", "Render film"],
+];
+
+const recent = () => {
+  try {
+    return JSON.parse(localStorage.getItem("bp_recent") || "[]");
+  } catch {
+    return [];
+  }
+};
+function remember(p) {
+  try {
+    const list = recent().filter((x) => x.id !== p.id);
+    list.unshift({ id: p.id, name: p.person.name || "Untitled", at: Date.now() });
+    localStorage.setItem("bp_recent", JSON.stringify(list.slice(0, 20)));
+  } catch {}
+}
+
+const fileUrl = (dir, f) => `files/${P.id}/${dir}/${encodeURIComponent(f)}`;
+const TYPES = ["birth", "school", "graduation", "college", "job", "marriage", "child", "move", "military", "award", "fame", "retirement", "death", "other"];
+
+// ---------- routing ----------
+function route() {
+  const m = location.hash.match(/p=([A-Za-z0-9]+)(?:&s=(\w+))?/);
+  if (!m) {
+    P = null;
+    return renderHome();
+  }
+  step = m[2] || step;
+  if (!P || P.id !== m[1]) {
+    api("GET", `api/projects/${m[1]}`)
+      .then((p) => {
+        P = p;
+        remember(P);
+        render();
+        watchJobs();
+      })
+      .catch((e) => {
+        toast(e.message, true);
+        location.hash = "";
+      });
+  } else render();
+}
+window.addEventListener("hashchange", route);
+const go = (s) => (location.hash = `p=${P.id}&s=${s}`);
+
+// ---------- persistence ----------
+let saveTimer;
+function patch(body, delay = 500) {
+  clearTimeout(saveTimer);
+  patch.pending = { ...(patch.pending || {}), ...body };
+  return new Promise((res) => {
+    saveTimer = setTimeout(async () => {
+      const b = patch.pending;
+      patch.pending = null;
+      try {
+        const p = await api("PATCH", `api/projects/${P.id}`, b);
+        P = { ...p, jobs: p.jobs };
+        renderProjBar();
+        res(P);
+      } catch (e) {
+        toast(e.message, true);
+        res(null);
+      }
+    }, delay);
+  });
+}
+const flush = () => patch({}, 0);
+
+// ---------- job watching ----------
+const watching = new Set();
+async function watchJob(job, { onDone } = {}) {
+  if (watching.has(job.id)) return;
+  watching.add(job.id);
+  while (true) {
+    await new Promise((r) => setTimeout(r, 1500));
+    let j;
+    try {
+      j = await api("GET", `api/jobs/${job.id}`);
+    } catch {
+      break;
+    }
+    updateJobUI(j);
+    if (j.status === "done" || j.status === "error") {
+      watching.delete(job.id);
+      if (j.status === "error") toast(`${j.label}: ${j.error}`, true);
+      else toast(`${j.label} — done`);
+      await reload();
+      onDone?.(j);
+      return j;
+    }
+  }
+  watching.delete(job.id);
+}
+function watchJobs() {
+  for (const j of P.jobs || []) watchJob(j);
+}
+async function reload() {
+  P = await api("GET", `api/projects/${P.id}`);
+  render();
+}
+const jobUI = new Map();
+function updateJobUI(j) {
+  jobUI.set(j.id, j);
+  const box = $("#jobs");
+  if (!box) return;
+  box.replaceChildren(
+    ...[...jobUI.values()]
+      .filter((x) => x.status === "running" || x.status === "queued")
+      .map((x) =>
+        h("div", { class: "job" },
+          h("div", {}, h("b", {}, x.label), " ", h("span", { class: "muted" }, x.status === "queued" ? "(queued)" : x.log?.at(-1)?.slice(9) || "")),
+          h("div", { class: "progress" }, h("div", { style: `width:${Math.round((x.progress || 0) * 100)}%` }))),
+      ),
+  );
+  const log = $("#renderLog");
+  if (log && j.type === "render") {
+    log.textContent = (j.log || []).join("\n");
+    log.scrollTop = log.scrollHeight;
+    const bar = $("#renderBar");
+    if (bar) bar.style.width = `${Math.round(j.progress * 100)}%`;
+  }
+}
+
+// ---------- chrome ----------
+function renderProjBar() {
+  const bar = $("#projBar");
+  bar.replaceChildren();
+  if (!P) return;
+  bar.append(
+    h("span", { class: "muted small" }, "Biopic of"),
+    h("b", {}, P.person.name || "Untitled"),
+    h("button", { class: "btn sm ghost", onclick: () => (location.hash = "") }, "All biopics"),
+  );
+}
+
+function renderSteps() {
+  const nav = $("#steps");
+  nav.replaceChildren();
+  if (!P) return;
+  const done = {
+    person: !!P.person.name,
+    media: P.photos.length > 0,
+    timeline: P.timeline.length > 0,
+    interview: P.interview.some((q) => q.answer),
+    history: !!P.context,
+    style: !!P.settings.voice,
+    script: Object.keys(P.scripts).length > 0,
+    render: Object.keys(P.renders).length > 0,
+  };
+  STEPS.forEach(([k, label], i) =>
+    nav.append(
+      h("button", { class: (k === step ? "on " : "") + (done[k] ? "done" : ""), onclick: () => go(k), "aria-current": k === step ? "step" : null },
+        h("span", { class: "n" }, done[k] && k !== step ? "✓" : i + 1), label),
+    ),
+  );
+}
+
+function render() {
+  renderProjBar();
+  renderSteps();
+  if (!P) return;
+  const views = { person: vPerson, media: vMedia, timeline: vTimeline, interview: vInterview, history: vHistory, style: vStyle, script: vScript, render: vRender };
+  const scrollY = window.scrollY;
+  const active = document.activeElement?.id;
+  main.replaceChildren(h("div", { id: "jobs", class: "jobs" }), (views[step] || vPerson)());
+  for (const j of P.jobs || []) updateJobUI(j);
+  window.scrollTo(0, scrollY);
+  if (active && document.getElementById(active)) document.getElementById(active).focus();
+}
+
+function nextBtn(to, label = "Continue") {
+  return h("div", { class: "row end" }, h("button", { class: "btn primary", onclick: async () => { await flush(); go(to); } }, label + " →"));
+}
+
+function aiWarn() {
+  return health.ai ? null : h("div", { class: "card", style: "border-color:var(--red)" }, "AI features are offline on this server (no Anthropic API key configured).");
+}
+
+// ---------- home ----------
+function renderHome() {
+  renderProjBar();
+  renderSteps();
+  const list = recent();
+  main.replaceChildren(
+    h("div", { class: "hero" },
+      h("h1", {}, "Every life is a film."),
+      h("p", {}, "Upload photos, documents, dates and places. BioPicker interviews you, researches the history around each moment, casts a narrator, and cuts a Ken Burns–style biopic with public-domain newsreels, art and music."),
+      h("div", { class: "row", style: "justify-content:center" },
+        h("input", { id: "newName", placeholder: "Whose story? e.g. Grandma Rose Alvarez", style: "max-width:340px" }),
+        h("button", { class: "btn primary", onclick: newProject }, "Start a biopic")),
+      list.length
+        ? h("div", { class: "recent" }, h("h3", {}, "Your biopics on this device"),
+            ...list.map((x) => h("a", { href: `#p=${x.id}` }, x.name, h("span", { class: "muted small" }, "  · ", new Date(x.at).toLocaleDateString()))))
+        : null,
+    ),
+  );
+  $("#newName").addEventListener("keydown", (e) => e.key === "Enter" && newProject());
+}
+
+async function newProject() {
+  const name = $("#newName").value.trim();
+  try {
+    const p = await api("POST", "api/projects", { name });
+    P = p;
+    remember(P);
+    location.hash = `p=${p.id}&s=person`;
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function showLogin() {
+  main.replaceChildren(
+    h("div", { class: "hero" }, h("h1", {}, "BioPicker"), h("p", {}, "This studio is private. Enter the passcode."),
+      h("div", { class: "row", style: "justify-content:center" },
+        h("input", { id: "pc", type: "password", placeholder: "Passcode", style: "max-width:260px" }),
+        h("button", { class: "btn primary", onclick: async () => { await api("POST", "api/login", { passcode: $("#pc").value }).then(() => route()).catch((e) => toast(e.message, true)); } }, "Enter"))),
+  );
+}
+
+// ---------- 1. person ----------
+function field(label, key, opts = {}) {
+  const el = opts.textarea
+    ? h("textarea", { id: `f_${key}`, rows: opts.rows || 3, placeholder: opts.ph || "" })
+    : opts.select
+      ? h("select", { id: `f_${key}` }, ...opts.select.map(([v, l]) => h("option", { value: v }, l)))
+      : h("input", { id: `f_${key}`, placeholder: opts.ph || "", type: opts.type || "text" });
+  el.value = P.person[key] || "";
+  el.addEventListener("input", () => patch({ person: { [key]: el.value } }));
+  el.addEventListener("change", () => patch({ person: { [key]: el.value } }));
+  return h("label", { class: "f" + (opts.full ? " full" : "") }, label, el);
+}
+
+function vPerson() {
+  return h("section", {},
+    h("h1", {}, "Who is this film about?"),
+    h("p", { class: "lead" }, "The basics shape everything — the narrator we cast, the history we overlay and the questions the AI asks you."),
+    aiWarn(),
+    h("div", { class: "card grid2" },
+      field("Full name", "name", { ph: "Rose María Alvarez" }),
+      field("Goes by", "preferredName", { ph: "Grandma Rose" }),
+      field("Pronouns for narration", "pronouns", { select: [["she/her", "she/her"], ["he/him", "he/him"], ["they/them", "they/them"]] }),
+      field("Narration language", "language", { select: [["en", "English"], ["es", "Spanish"], ["fr", "French"], ["de", "German"], ["it", "Italian"], ["pt", "Portuguese"], ["hi", "Hindi"], ["zh", "Chinese"], ["ja", "Japanese"], ["ar", "Arabic"]] }),
+      field("Date of birth", "born", { type: "date" }),
+      field("Birthplace", "birthplace", { ph: "San Antonio, Texas, USA" }),
+      field("Date of death (if applicable)", "died", { type: "date" }),
+      field("Nationality / heritage", "nationality", { ph: "Mexican-American" }),
+      field("Occupation(s)", "occupation", { ph: "Teacher, then school principal" }),
+      field("Claim to fame", "claimToFame", { ph: "Founded the city's first bilingual school" }),
+      field("Personality — a few words", "personality", { full: true, ph: "Stubborn, generous, terrible singer, never missed a birthday" }),
+      field("Friends & family", "family", { full: true, textarea: true, ph: "Married Luis in 1968; three kids: Ana, Marco, Sofia; best friend June from nursing school…" }),
+      field("Legacy — what they leave behind", "legacy", { full: true, textarea: true }),
+      field("Anything else", "notes", { full: true, textarea: true }),
+    ),
+    nextBtn("media"),
+  );
+}
+
+// ---------- 2. media ----------
+function dropZone(label, accept, multiple, onFiles, id) {
+  const input = h("input", { type: "file", accept, multiple, hidden: true, id });
+  input.addEventListener("change", () => input.files.length && onFiles([...input.files]));
+  const z = h("div", { class: "drop", tabindex: 0, role: "button", onclick: () => input.click(), onkeydown: (e) => (e.key === "Enter" || e.key === " ") && input.click() }, label, input);
+  z.addEventListener("dragover", (e) => { e.preventDefault(); z.classList.add("over"); });
+  z.addEventListener("dragleave", () => z.classList.remove("over"));
+  z.addEventListener("drop", (e) => { e.preventDefault(); z.classList.remove("over"); onFiles([...e.dataTransfer.files]); });
+  return z;
+}
+
+async function uploadFiles(url, field, files) {
+  const chunks = [];
+  for (let i = 0; i < files.length; i += 20) chunks.push(files.slice(i, i + 20));
+  for (const [ci, c] of chunks.entries()) {
+    toast(`Uploading ${Math.min((ci + 1) * 20, files.length)} of ${files.length}…`);
+    const fd = new FormData();
+    c.forEach((f) => fd.append(field, f));
+    const r = await api("POST", url, fd, true);
+    const proj = r.project || r;
+    if (r.errors?.length) toast(r.errors.join("; "), true);
+    P = proj;
+  }
+  render();
+  watchJobs();
+}
+
+function vMedia() {
+  const evOpts = [["", "— link to event —"], ...P.timeline.map((e) => [e.id, `${e.date || "?"} ${e.title}`])];
+  const photoPatch = (id, obj) => {
+    const ph = P.photos.find((x) => x.id === id);
+    Object.assign(ph, obj);
+    patch({ photos: [{ id, ...obj }] });
+  };
+  const dated = P.photos.filter((ph) => /^\d{4}/.test(ph.date || ""));
+  return h("section", {},
+    h("h1", {}, "Photos & documents"),
+    h("p", { class: "lead" }, "Drop in photos (dates and GPS are read from their metadata) and documents — résumés, diplomas, obituaries, letters, articles (PDF, image or text). The AI reads them and suggests timeline events."),
+    h("div", { class: "grid2" },
+      dropZone("📷  Drop photos here or click to choose (JPEG, PNG, WebP, HEIC)", "image/*", true, (f) => uploadFiles(`api/projects/${P.id}/photos`, "photos", f).catch((e) => toast(e.message, true)), "photoInput"),
+      dropZone("📄  Drop documents here (PDF, image scans, .txt)", ".pdf,.txt,.md,.csv,.json,.html,image/*", true, (f) => uploadFiles(`api/projects/${P.id}/documents`, "docs", f).catch((e) => toast(e.message, true)), "docInput"),
+    ),
+    P.documents.length
+      ? h("div", { class: "card", style: "margin-top:16px" },
+          h("h2", {}, "Documents"),
+          ...P.documents.map((d) =>
+            h("div", { style: "border-top:1px solid var(--line);padding:10px 0" },
+              h("div", { class: "row" }, h("b", {}, d.name), h("span", { class: "tag" + (d.status === "done" ? " ok" : "") }, d.status), h("span", { class: "spacer" }),
+                h("a", { href: fileUrl("docs", d.file), target: "_blank", class: "small" }, "open"),
+                h("button", { class: "btn sm danger", onclick: async () => { P = await api("DELETE", `api/projects/${P.id}/documents/${d.id}`); render(); } }, "Remove")),
+              d.summary ? h("p", { class: "muted small" }, d.summary) : null,
+              d.events?.length
+                ? h("div", {},
+                    h("div", { class: "row small" }, h("span", { class: "muted" }, `${d.events.length} suggested events`),
+                      h("button", { class: "btn sm", onclick: () => addEvents(d.events) }, "Add all to timeline")),
+                    h("ul", { class: "small" }, ...d.events.map((e) => h("li", {}, `${e.date} — ${e.title}${e.place ? " @ " + e.place : ""} `,
+                      h("button", { class: "btn sm ghost", onclick: () => addEvents([e]) }, "+ add")))))
+                : null,
+            ),
+          ))
+      : null,
+    P.photos.length
+      ? h("div", { style: "margin-top:18px" },
+          h("div", { class: "row" }, h("h2", {}, `Photos (${P.photos.length})`), h("span", { class: "spacer" }),
+            dated.length ? h("button", { class: "btn sm", onclick: () => photosToEvents() }, "Suggest timeline events from photo dates") : null),
+          h("div", { class: "photos" },
+            ...P.photos.map((ph) =>
+              h("div", { class: "ph" + (ph.include === false ? " off" : "") },
+                h("img", { src: fileUrl("thumbs", ph.file), alt: ph.caption || ph.originalName, loading: "lazy" }),
+                h("div", { class: "b" },
+                  h("div", { class: "row small" },
+                    ph.exif?.date ? h("span", { class: "tag ok", title: "Date from photo metadata" }, "EXIF date") : null,
+                    ph.exif?.lat != null ? h("span", { class: "tag ok", title: "GPS from photo metadata" }, "GPS") : null,
+                    ph.ai ? h("span", { class: "tag", title: ph.ai.description }, "AI ✓") : h("span", { class: "tag" }, "…"),
+                  ),
+                  h("input", { value: ph.caption || "", placeholder: "Caption", oninput: (e) => photoPatch(ph.id, { caption: e.target.value }) }),
+                  h("div", { class: "row", style: "flex-wrap:nowrap" },
+                    h("input", { value: ph.date || "", placeholder: ph.ai?.estimatedYearRange || "Date / year", oninput: (e) => photoPatch(ph.id, { date: e.target.value }) }),
+                    h("input", { value: ph.place || "", placeholder: "Place", oninput: (e) => photoPatch(ph.id, { place: e.target.value }) })),
+                  h("select", { onchange: (e) => photoPatch(ph.id, { eventId: e.target.value || null }) },
+                    ...evOpts.map(([v, l]) => h("option", { value: v, selected: (ph.eventId || "") === v }, l))),
+                  ph.ai ? h("div", { class: "ai" }, ph.ai.description) : null,
+                  h("div", { class: "row" },
+                    h("label", { class: "small muted row" }, h("input", { type: "checkbox", checked: ph.include !== false, onchange: (e) => { photoPatch(ph.id, { include: e.target.checked }); render(); } }), "use in film"),
+                    h("span", { class: "spacer" }),
+                    h("button", { class: "btn sm danger", onclick: async () => { P = await api("DELETE", `api/projects/${P.id}/photos/${ph.id}`); render(); } }, "Delete")),
+                ),
+              ),
+            ),
+          ))
+      : null,
+    h("div", { style: "height:14px" }),
+    nextBtn("timeline"),
+  );
+}
+
+function addEvents(evts) {
+  const tl = [...P.timeline];
+  for (const e of evts) {
+    if (tl.some((x) => x.date === e.date && x.title === e.title)) continue;
+    tl.push({ id: undefined, date: e.date, type: TYPES.includes(e.type) ? e.type : "other", title: e.title, place: e.place || "", description: e.description || "" });
+  }
+  patch({ timeline: tl }, 0).then(() => { toast(`${evts.length} event(s) added to the timeline`); render(); });
+}
+
+function photosToEvents() {
+  const byYear = {};
+  for (const ph of P.photos) {
+    const y = String(ph.date || "").slice(0, 4);
+    if (!/^\d{4}$/.test(y)) continue;
+    (byYear[y] ||= []).push(ph);
+  }
+  const evts = Object.entries(byYear)
+    .filter(([y]) => !P.timeline.some((e) => String(e.date).startsWith(y)))
+    .map(([y, phs]) => ({ date: phs[0].date, type: "other", title: phs[0].caption || `Photos from ${y}`, place: phs.find((p) => p.place)?.place || "", description: phs.map((p) => p.ai?.description).filter(Boolean).slice(0, 2).join(" ") }));
+  if (!evts.length) return toast("Every photo year already has an event.");
+  addEvents(evts);
+}
+
+// ---------- 3. timeline ----------
+function vTimeline() {
+  const tl = P.timeline.map((e) => ({ ...e }));
+  const save = () => patch({ timeline: tl }, 900);
+  const quick = [
+    ["birth", "Born", P.person.born, P.person.birthplace],
+    ["graduation", "Graduated from high school", "", ""],
+    ["college", "Went to college", "", ""],
+    ["job", "First job", "", ""],
+    ["fame", P.person.claimToFame || "Claim to fame", "", ""],
+    ["marriage", "Married", "", ""],
+  ];
+  const addRow = (type, title, date, place) => {
+    tl.push({ date: date || "", type, title, place: place || "", description: "" });
+    patch({ timeline: tl }, 0).then(() => render());
+  };
+  return h("section", {},
+    h("h1", {}, "Timeline & places"),
+    h("p", { class: "lead" }, "Key dates and where they happened. Places are placed on a map in the film; dates anchor the history overlay. Use YYYY, YYYY-MM or YYYY-MM-DD."),
+    h("div", { class: "row", style: "margin-bottom:12px" }, h("span", { class: "muted small" }, "Quick add:"),
+      ...quick.filter(([t]) => !tl.some((e) => e.type === t)).map(([t, title, d, pl]) => h("button", { class: "btn sm", onclick: () => addRow(t, title, d, pl) }, "+ " + title)),
+      h("button", { class: "btn sm primary", onclick: () => addRow("other", "", "", "") }, "+ Event")),
+    h("div", { class: "tl" },
+      ...(tl.length ? tl : []).map((e, i) =>
+        h("div", { class: "ev" },
+          h("input", { value: e.date, placeholder: "1969-07-20", "aria-label": "Date", oninput: (x) => { e.date = x.target.value; save(); } }),
+          h("select", { "aria-label": "Type", onchange: (x) => { e.type = x.target.value; save(); } }, ...TYPES.map((t) => h("option", { value: t, selected: e.type === t }, t))),
+          h("input", { value: e.title, placeholder: "What happened", "aria-label": "Title", oninput: (x) => { e.title = x.target.value; save(); } }),
+          h("input", { value: e.place, placeholder: "City, Region, Country" + (e.lat != null ? "" : ""), "aria-label": "Place", title: e.lat != null ? `📍 ${e.lat.toFixed(3)}, ${e.lon.toFixed(3)}` : "", oninput: (x) => { e.place = x.target.value; save(); } }),
+          h("button", { class: "btn sm danger x", title: "Remove", "aria-label": "Remove event", onclick: () => { tl.splice(i, 1); patch({ timeline: tl }, 0).then(() => render()); } }, "✕"),
+          h("textarea", { placeholder: "Details, people involved, a memory…", oninput: (x) => { e.description = x.target.value; save(); } }, e.description || ""),
+        ),
+      ),
+      tl.length ? null : h("div", { class: "card muted" }, "No events yet — use Quick add, or add suggestions from your documents and photos."),
+    ),
+    h("div", { style: "height:14px" }),
+    nextBtn("interview"),
+  );
+}
+
+// ---------- 4. interview ----------
+function vInterview() {
+  const ask = async (btn) => {
+    btn.disabled = true;
+    btn.textContent = "Thinking of good questions…";
+    try {
+      await flush();
+      P = await api("POST", `api/projects/${P.id}/interview/next`);
+      render();
+    } catch (e) {
+      toast(e.message, true);
+      btn.disabled = false;
+    }
+  };
+  return h("section", {},
+    h("h1", {}, "The AI interview"),
+    h("p", { class: "lead" }, "A documentary producer's questions about personality, fame, friends & family and legacy — tailored to what you've shared so far. Answer what you can; skip the rest. Every answer makes the film more personal."),
+    aiWarn(),
+    ...P.interview.map((q) =>
+      h("div", { class: "qa" },
+        h("div", { class: "row" }, h("span", { class: "tag" }, q.category), h("span", { class: "spacer" }),
+          h("button", { class: "btn sm ghost", title: "Remove question", onclick: () => { P.interview = P.interview.filter((x) => x !== q); patch({ interview: P.interview.map(({ id, answer }) => ({ id, answer })) }, 0).then(render); } }, "✕")),
+        h("div", { class: "q" }, q.question),
+        h("div", { class: "why" }, q.why),
+        h("textarea", { rows: 3, placeholder: "Your answer…", oninput: (e) => { q.answer = e.target.value; patch({ interview: P.interview.map(({ id, answer }) => ({ id, answer })) }, 900); } }, q.answer || ""),
+      ),
+    ),
+    h("div", { class: "row" },
+      h("button", { class: "btn primary", disabled: !health.ai, onclick: (e) => ask(e.currentTarget) }, P.interview.length ? "Ask me more questions" : "Start the interview"),
+      h("span", { class: "spacer" }),
+      h("button", { class: "btn", onclick: async () => { await flush(); go("history"); } }, "Continue →")),
+  );
+}
+
+// ---------- 5. history ----------
+function vHistory() {
+  const c = P.context;
+  const byId = Object.fromEntries(P.timeline.map((e) => [e.id, e]));
+  return h("section", {},
+    h("h1", {}, "History overlay"),
+    h("p", { class: "lead" }, "What was happening in the world — and down the street — at each moment of this life, the cultural shifts of the time, and how they may have shaped the person. These become 'Meanwhile…' scenes with public-domain newsreels and art."),
+    aiWarn(),
+    h("div", { class: "row", style: "margin-bottom:14px" },
+      h("button", { class: "btn primary", disabled: !health.ai || !P.timeline.length, onclick: async () => { await flush(); try { const j = await api("POST", `api/projects/${P.id}/context`); watchJob(j); updateJobUI(j); } catch (e) { toast(e.message, true); } } },
+        c ? "Research again" : "Research the history"),
+      P.timeline.length ? null : h("span", { class: "muted small" }, "Add timeline events first."),
+      c ? h("span", { class: "muted small" }, "AI-researched — double-check anything you'll publish.") : null),
+    c
+      ? h("div", { class: "hist" },
+          h("div", { class: "card" }, h("h3", {}, "The arc of history"), h("p", {}, c.eraOverview)),
+          ...c.moments.map((m) =>
+            h("div", { class: "m" },
+              h("h3", {}, `${m.year} · ${byId[m.eventId]?.title || ""}`),
+              h("div", { class: "grid2" },
+                h("div", {}, h("b", { class: "small" }, "WORLD"), h("ul", {}, ...m.world.map((w) => h("li", {}, h("b", {}, w.title), " — ", w.description)))),
+                h("div", {}, h("b", { class: "small" }, "LOCAL / NATIONAL"), h("ul", {}, ...(m.local.length ? m.local : [{ title: "—", description: "" }]).map((w) => h("li", {}, h("b", {}, w.title), w.description ? " — " + w.description : ""))))),
+              h("p", { class: "small" }, h("b", {}, "Cultural shift: "), m.culturalShift),
+              h("p", { class: "inf" }, m.influence),
+              h("div", { class: "small muted" }, m.archivalQuery ? `🎞 footage: “${m.archivalQuery}”  ` : "", m.artQuery ? `🖼 art: “${m.artQuery}”` : ""),
+            ),
+          ))
+      : null,
+    h("div", { style: "height:14px" }),
+    nextBtn("style"),
+  );
+}
+
+// ---------- 6. style & voice ----------
+function vStyle() {
+  const s = P.settings;
+  const set = (obj, now) => { Object.assign(P.settings, obj); return patch({ settings: obj }, now ? 0 : 500); };
+  const tones = [
+    ["serious", "Serious", "A dignified, cinematic documentary portrait."],
+    ["humorous", "Humorous", "Affectionate and witty — a loving roast with great timing."],
+    ["teachable", "Teachable", "A history lesson: context, choices and takeaways for students."],
+  ];
+  const voiceBox = h("div", {});
+  const drawVoices = () => {
+    if (!voices) {
+      voiceBox.replaceChildren(h("span", { class: "muted" }, "Loading voices…"));
+      return;
+    }
+    const lang = (P.person.language || "en").slice(0, 2);
+    const filter = $("#vfilter")?.value ?? "lang";
+    const list = voices.filter((v) => filter === "all" || v.locale.toLowerCase().startsWith(lang) || v.provider !== "edge");
+    const cur = s.voice || {};
+    const sel = h("select", { id: "voiceSel", onchange: (e) => { const v = voices.find((x) => x.id === e.target.value); set({ voice: { provider: v.provider, id: v.id, label: v.label, rate: cur.rate || 0, pitch: cur.pitch || 0 } }, true); } },
+      h("option", { value: "" }, "— choose a narrator —"),
+      ...list.map((v) => h("option", { value: v.id, selected: v.id === cur.id }, `${v.label} · ${v.gender} · ${v.locale}${v.personality ? " · " + v.personality : ""}`)));
+    const rate = h("input", { type: "range", min: -30, max: 30, value: cur.rate || 0, oninput: (e) => { rl.textContent = `${e.target.value}%`; }, onchange: (e) => set({ voice: { ...P.settings.voice, rate: +e.target.value } }, true) });
+    const pitch = h("input", { type: "range", min: -20, max: 20, value: cur.pitch || 0, oninput: (e) => { pl.textContent = `${e.target.value}%`; }, onchange: (e) => set({ voice: { ...P.settings.voice, pitch: +e.target.value } }, true) });
+    const rl = h("span", { class: "muted small" }, `${cur.rate || 0}%`);
+    const pl = h("span", { class: "muted small" }, `${cur.pitch || 0}%`);
+    voiceBox.replaceChildren(
+      h("div", { class: "grid2" },
+        h("label", { class: "f full" }, "Narrator voice", sel),
+        h("label", { class: "f" }, h("span", {}, "Pace ", rl), rate),
+        h("label", { class: "f" }, h("span", {}, "Pitch ", pl), pitch),
+        h("label", { class: "f" }, "Show", h("select", { id: "vfilter", onchange: drawVoices }, h("option", { value: "lang", selected: filter === "lang" }, "Voices for the narration language"), h("option", { value: "all", selected: filter === "all" }, "All voices (300+)"))),
+        h("label", { class: "f" }, "Preview line", h("input", { id: "pvText", value: `This is the story of ${P.person.preferredName || P.person.name || "a remarkable life"}.` })),
+      ),
+      h("div", { class: "row", style: "margin-top:10px" },
+        h("button", { class: "btn", disabled: !s.voice?.id, onclick: async (e) => {
+          const b = e.currentTarget; b.disabled = true;
+          try { const blob = await api("POST", "api/tts/preview", { voice: P.settings.voice, text: $("#pvText").value }); const a = new Audio(URL.createObjectURL(blob)); a.play(); } catch (er) { toast(er.message, true); }
+          b.disabled = false;
+        } }, "▶ Preview voice"),
+        h("button", { class: "btn primary", disabled: !health.ai, onclick: async (e) => {
+          const b = e.currentTarget; b.disabled = true; b.textContent = "Casting…";
+          try { await flush(); P = await api("POST", `api/projects/${P.id}/voice/cast`); render(); toast(`Cast: ${P.settings.voice.label}`); } catch (er) { toast(er.message, true); b.disabled = false; }
+        } }, "✨ Let AI cast the narrator")),
+      s.voiceRationale ? h("p", { class: "inf small", style: "margin-top:10px" }, s.voiceRationale) : null,
+    );
+  };
+  if (!voices) api("GET", "api/voices").then((v) => { voices = v; drawVoices(); }).catch((e) => toast(e.message, true));
+  drawVoices();
+
+  const musicUp = h("div", {});
+  const drawMusic = () =>
+    musicUp.replaceChildren(
+      s.music === "upload"
+        ? h("div", {},
+            dropZone("🎵 Drop your own music (mp3, wav, ogg, m4a) — make sure you have the rights", "audio/*", true, (f) => uploadFiles(`api/projects/${P.id}/music`, "music", f).catch((e) => toast(e.message, true)), "musicInput"),
+            ...P.uploadedMusic.map((m) => h("div", { class: "row small", style: "margin-top:6px" }, "🎵 ", m.name, h("span", { class: "spacer" }), h("button", { class: "btn sm danger", onclick: async () => { P = await api("DELETE", `api/projects/${P.id}/music/${m.id}`); render(); } }, "Remove"))))
+        : null,
+    );
+  drawMusic();
+
+  return h("section", {},
+    h("h1", {}, "Style, length & voice"),
+    h("h2", {}, "Tone"),
+    h("div", { class: "tones", style: "margin-bottom:18px" },
+      ...tones.map(([k, t, d]) => h("div", { class: "tone" + (s.tone === k ? " on" : ""), tabindex: 0, role: "radio", "aria-checked": s.tone === k, onclick: () => { set({ tone: k }, true); render(); }, onkeydown: (e) => e.key === "Enter" && (set({ tone: k }, true), render()) }, h("div", { class: "t" }, t), h("div", { class: "d" }, d)))),
+    h("div", { class: "card grid3" },
+      h("label", { class: "f" }, "Short version (seconds)", h("input", { type: "number", min: 30, max: 300, value: s.shortSeconds, onchange: (e) => set({ shortSeconds: +e.target.value }) })),
+      h("label", { class: "f" }, "Long version (seconds)", h("input", { type: "number", min: 120, max: 1800, value: s.longSeconds, onchange: (e) => set({ longSeconds: +e.target.value }) })),
+      h("label", { class: "f" }, "Video quality", h("select", { onchange: (e) => set({ quality: e.target.value }) }, ...["480p", "720p", "1080p"].map((q) => h("option", { value: q, selected: s.quality === q }, q)))),
+      h("label", { class: "f" }, "Music", h("select", { onchange: (e) => { set({ music: e.target.value }, true); s.music = e.target.value; drawMusic(); } },
+        ...[["auto", "Public-domain classics (auto-picked)"], ["generated", "Original ambient score"], ["upload", "My own music"], ["none", "No music"]].map(([v, l]) => h("option", { value: v, selected: s.music === v }, l)))),
+      h("label", { class: "f" }, "Archival newsreels", h("select", { onchange: (e) => set({ includeArchival: e.target.value === "1" }) }, h("option", { value: "1", selected: s.includeArchival }, "Include public-domain footage"), h("option", { value: "0", selected: !s.includeArchival }, "Don't include"))),
+      h("label", { class: "f" }, "Public-domain art", h("select", { onchange: (e) => set({ includeArt: e.target.value === "1" }) }, h("option", { value: "1", selected: s.includeArt }, "Include paintings & prints"), h("option", { value: "0", selected: !s.includeArt }, "Don't include"))),
+      h("label", { class: "f" }, "Captions", h("select", { onchange: (e) => set({ burnCaptions: e.target.value === "1" }) }, h("option", { value: "0", selected: !s.burnCaptions }, "Separate .srt file only"), h("option", { value: "1", selected: s.burnCaptions }, "Burn into the video too"))),
+    ),
+    musicUp,
+    h("h2", { style: "margin-top:18px" }, "Narrator"),
+    h("div", { class: "card" }, voiceBox),
+    nextBtn("script"),
+  );
+}
+
+// ---------- 7. script ----------
+const VIS_TYPES = ["photo", "map", "archival", "still", "art", "card"];
+function thumbFor(v) {
+  const a = v.asset;
+  if (a?.kind === "photo") {
+    const ph = P.photos.find((x) => x.id === a.photoId);
+    return ph ? h("img", { class: "th", src: fileUrl("thumbs", ph.file), alt: "" }) : h("div", { class: "th" }, "photo");
+  }
+  if (a?.kind === "image") return h("img", { class: "th", src: fileUrl("media", a.file), alt: "", loading: "lazy" });
+  if (a?.kind === "video") return h("video", { class: "th", src: fileUrl("media", a.file), muted: true, preload: "metadata", onmouseenter: (e) => e.target.play(), onmouseleave: (e) => e.target.pause() });
+  if (a?.kind === "map") return h("div", { class: "th" }, "🗺 " + (a.label || ""));
+  return h("div", { class: "th" }, { card: "🅣 title card", archival: "🎞 not found yet", still: "📷 not found yet", art: "🖼 not found yet", photo: "📷", map: "🗺" }[v.type] || v.type);
+}
+
+function vScript() {
+  const s = P.scripts[scriptTab];
+  const busy = (P.jobs || []).some((j) => ["script", "media"].includes(j.type));
+  const save = (now) => api("PUT", `api/projects/${P.id}/scripts/${scriptTab}`, { title: s.title, tagline: s.tagline, scenes: s.scenes.map((sc) => ({ ...sc, visuals: sc.visuals.map((v, i) => ({ type: v.type, ref: v.ref, caption: v.caption, i })) })) })
+    .then((p) => { P = p; if (now) render(); }).catch((e) => toast(e.message, true));
+  let t;
+  const saveSoon = () => { clearTimeout(t); t = setTimeout(() => save(false), 900); };
+  const write = async () => {
+    await flush();
+    try {
+      const j = await api("POST", `api/projects/${P.id}/scripts/${scriptTab}`);
+      updateJobUI(j);
+      watchJob(j);
+    } catch (e) { toast(e.message, true); }
+  };
+  const words = s ? s.scenes.reduce((a, sc) => a + (sc.narration || "").split(/\s+/).filter(Boolean).length, 0) : 0;
+  return h("section", {},
+    h("h1", {}, "Script & media"),
+    h("p", { class: "lead" }, "Claude writes the narration and picks the pictures: your photos, maps of each place, and public-domain newsreels, historic photos and art. Edit any line, swap any clip, then render."),
+    aiWarn(),
+    h("div", { class: "tabs" }, ...["short", "long"].map((v) => h("button", { class: scriptTab === v ? "on" : "", onclick: () => { scriptTab = v; render(); } }, `${v === "short" ? "Short" : "Long"} version · ${v === "short" ? P.settings.shortSeconds : P.settings.longSeconds}s`))),
+    h("div", { class: "row", style: "margin-bottom:14px" },
+      h("button", { class: "btn primary", disabled: busy || !health.ai, onclick: write }, s ? "Rewrite script" : `Write the ${scriptTab} script`),
+      s ? h("button", { class: "btn", disabled: busy, onclick: async () => { const j = await api("POST", `api/projects/${P.id}/scripts/${scriptTab}/media`); updateJobUI(j); watchJob(j); } }, "Re-find media") : null,
+      s ? h("span", { class: "muted small" }, `${s.scenes.length} scenes · ${words} words ≈ ${Math.round(words / 2.4)}s narration · tone: ${s.tone}${s.mediaResolvedAt ? "" : " · media needs refresh"}`) : null,
+      h("span", { class: "spacer" }),
+      s ? h("button", { class: "btn", onclick: () => go("render") }, "Render →") : null),
+    s
+      ? h("div", {},
+          h("div", { class: "card grid2" },
+            h("label", { class: "f" }, "Film title", h("input", { value: s.title, oninput: (e) => { s.title = e.target.value; saveSoon(); } })),
+            h("label", { class: "f" }, "Tagline", h("input", { value: s.tagline, oninput: (e) => { s.tagline = e.target.value; saveSoon(); } })),
+            h("div", { class: "full small muted", style: "grid-column:1/-1" }, `Score: ${s.musicMood || ""}`,
+              ...(s.music || []).map((m) => h("div", {}, "🎵 ", m.pageUrl ? h("a", { href: m.pageUrl, target: "_blank", rel: "noopener" }, m.title) : m.title, ` — ${m.source} (${m.license})`)),
+              P.settings.music !== "none" && !(s.music || []).length ? h("div", {}, "🎵 Original ambient score will be generated") : null)),
+          ...s.scenes.map((sc, i) =>
+            h("div", { class: "scene" },
+              h("div", { class: "hd" },
+                h("b", {}, `${i + 1}.`), h("span", { class: "tag" }, sc.kind),
+                h("input", { value: sc.onScreenTitle, placeholder: "On-screen title", oninput: (e) => { sc.onScreenTitle = e.target.value; saveSoon(); } }),
+                h("input", { value: sc.onScreenSubtitle, placeholder: "Subtitle", oninput: (e) => { sc.onScreenSubtitle = e.target.value; saveSoon(); } }),
+                h("button", { class: "btn sm danger", title: "Delete scene", onclick: () => { s.scenes.splice(i, 1); save(true); } }, "✕")),
+              h("textarea", { rows: 2, oninput: (e) => { sc.narration = e.target.value; saveSoon(); } }, sc.narration),
+              h("div", { class: "vis" },
+                ...sc.visuals.map((v, vi) =>
+                  h("div", { class: "vi" },
+                    thumbFor(v),
+                    h("div", { class: "cap" }, h("b", {}, v.type), " ", v.asset?.title ? `${v.asset.title.slice(0, 50)} · ${v.asset.source}` : v.ref),
+                    h("div", { class: "act" },
+                      v.candidates?.length > 1 ? h("button", { class: "btn sm", title: "Try the next search result", onclick: async (e) => { e.currentTarget.disabled = true; e.currentTarget.textContent = "…"; try { P = await api("POST", `api/projects/${P.id}/scripts/${scriptTab}/scenes/${sc.id}/visuals/${vi}/next`); render(); } catch (er) { toast(er.message, true); } } }, "↻ swap") : null,
+                      h("button", { class: "btn sm danger", onclick: () => { sc.visuals.splice(vi, 1); save(true); } }, "✕")),
+                  )),
+                h("div", { class: "vi", style: "padding:8px;display:flex;flex-direction:column;gap:6px" },
+                  h("select", { id: `nvT${i}` }, ...VIS_TYPES.map((t) => h("option", { value: t }, t))),
+                  h("select", { id: `nvP${i}` }, h("option", { value: "" }, "(photo…)"), ...P.photos.filter((p) => p.include !== false).map((p) => h("option", { value: p.id }, (p.caption || p.originalName).slice(0, 40)))),
+                  h("input", { id: `nvR${i}`, placeholder: "search phrase / place / text" }),
+                  h("button", { class: "btn sm", onclick: () => {
+                    const type = $(`#nvT${i}`).value;
+                    const ref = type === "photo" ? $(`#nvP${i}`).value : $(`#nvR${i}`).value.trim();
+                    if (!ref) return toast("Pick a photo or type a phrase", true);
+                    sc.visuals.push({ type, ref, caption: "" });
+                    save(true);
+                  } }, "+ add visual")),
+              ),
+            ),
+          ),
+          h("p", { class: "muted small" }, "Added or changed visuals are looked up when you click “Re-find media” (or automatically at render time)."),
+        )
+      : h("div", { class: "card muted" }, busy ? "Writing…" : "No script yet for this version."),
+  );
+}
+
+// ---------- 8. render ----------
+function vRender() {
+  const running = (P.jobs || []).find((j) => j.type === "render");
+  return h("section", {},
+    h("h1", {}, "Render the film"),
+    h("p", { class: "lead" }, "Narration is recorded, photos get the Ken Burns treatment, maps fly to each place, newsreels and art are cut in, and the score ducks under the voice. Rendering takes a few minutes (longer for the long version)."),
+    running ? h("div", { class: "card" }, h("b", {}, running.label), h("div", { class: "progress", style: "margin:10px 0" }, h("div", { id: "renderBar", style: `width:${Math.round(running.progress * 100)}%` })), h("div", { class: "log", id: "renderLog" }, (running.log || []).join("\n"))) : null,
+    ...["short", "long"].map((v) => {
+      const s = P.scripts[v];
+      const r = P.renders[v];
+      return h("div", { class: "card" },
+        h("div", { class: "row" },
+          h("h2", {}, v === "short" ? "Short version" : "Long version"),
+          h("span", { class: "spacer" }),
+          s ? h("button", { class: "btn primary", disabled: !!running, onclick: async () => { try { await flush(); const j = await api("POST", `api/projects/${P.id}/render/${v}`); updateJobUI(j); P.jobs = [...(P.jobs || []), j]; render(); watchJob(j); } catch (e) { toast(e.message, true); } } }, r ? "Re-render" : "Render")
+            : h("button", { class: "btn", onclick: () => { scriptTab = v; go("script"); } }, "Write this script first")),
+        r
+          ? h("div", {},
+              h("video", { controls: true, preload: "metadata", src: fileUrl("output", r.file) + `?t=${encodeURIComponent(r.at)}` },
+                r.vtt ? h("track", { kind: "captions", src: fileUrl("output", r.vtt), srclang: P.person.language || "en", label: "Captions" }) : null),
+              h("div", { class: "row", style: "margin-top:10px" },
+                h("a", { class: "btn", href: fileUrl("output", r.file) + "?download=1" }, "⬇ Download MP4"),
+                h("a", { class: "btn", href: fileUrl("output", r.srt) + "?download=1" }, "⬇ Captions (.srt)"),
+                h("span", { class: "muted small" }, `${r.seconds}s · ${r.quality} · ${new Date(r.at).toLocaleString()}`)))
+          : h("p", { class: "muted" }, s ? "Not rendered yet." : ""),
+      );
+    }),
+  );
+}
+
+// ---------- boot ----------
+api("GET", "api/health").then((x) => (health = x)).catch(() => {}).finally(route);

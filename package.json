@@ -1,0 +1,13 @@
+{
+  "name": "biopicker",
+  "version": "1.0.0",
+  "description": "BioPicker - AI biopic video maker. Copyright (c) 2026 ePerf",
+  "type": "module",
+  "main": "server.js",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js"
+  }
+}
