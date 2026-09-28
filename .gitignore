@@ -1,6 +1,9 @@
 .DS_Store
 node_modules/
+data/
 .env
 .env.*
 !.env.example
+desktop.ini
 conversation-*.txt
+*.log
