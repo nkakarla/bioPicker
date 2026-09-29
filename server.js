@@ -11,7 +11,8 @@ import { activeJobs, getJob, startJob } from "./lib/jobs.js";
 import { fetchImage, fetchVideoClip } from "./lib/media.js";
 import { deletePhotoFiles, ingestPhoto } from "./lib/photos.js";
 import { renderFilm, resolveMedia } from "./lib/produce.js";
-import { createProject, emptyProject, loadProject, projectPath, saveProject } from "./lib/store.js";
+import { createProject, emptyProject, exportProject, importProject, listProjects, loadProject, projectPath, saveProject } from "./lib/store.js";
+import { readZip, writeZip } from "./lib/zip.js";
 import { castingShortlist, listVoices, synthesize } from "./lib/tts.js";
 import { DATA_DIR, ROOT, ensureDir, newId, sortByDate } from "./lib/util.js";
 
@@ -60,7 +61,22 @@ const needAI = () => {
 app.get("/api/health", (req, res) => res.json({ ok: true, ai: ai.aiConfigured(), version: "1.0.0" }));
 
 // ---------- projects ----------
+app.get("/api/projects", wrap(async (req, res) => res.json(listProjects())));
 app.post("/api/projects", wrap(async (req, res) => res.json(createProject(String(req.body?.name || "").slice(0, 120)))));
+
+// backup (download everything as one .zip) and restore (upload that .zip here or on another BioPicker)
+const importUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 * 1024, files: 1 } });
+app.get("/api/projects/:id/export", wrap(async (req, res) => {
+  const { project, entries } = exportProject(req.params.id);
+  const slug = (project.person.name || "biopic").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "biopic";
+  res.attachment(`biopicker-${slug}-${new Date().toLocaleDateString("en-CA")}.zip`);
+  res.type("application/zip").send(writeZip(entries));
+}));
+app.post("/api/projects/import", importUpload.single("backup"), wrap(async (req, res) => {
+  if (!req.file) throw Object.assign(new Error("Choose a BioPicker backup (.zip) to restore."), { status: 400 });
+  const { project, copy } = importProject(readZip(req.file.buffer));
+  res.json({ id: project.id, name: project.person.name, copy });
+}));
 app.get("/api/projects/:id", wrap(async (req, res) => res.json(publicProject(P(req)))));
 
 const PERSON_KEYS = Object.keys(emptyProject("x").person);

@@ -81,11 +81,13 @@ const TYPES = ["birth", "school", "graduation", "college", "job", "marriage", "c
 function route() {
   const m = location.hash.match(/p=([A-Za-z0-9]+)(?:&s=(\w+))?/);
   if (!m) {
+    if (P && isDirty()) flush();
     P = null;
     return renderHome();
   }
   step = m[2] || step;
   if (!P || P.id !== m[1]) {
+    if (P && isDirty()) flush();
     api("GET", `api/projects/${m[1]}`)
       .then((p) => {
         P = p;
@@ -103,27 +105,162 @@ window.addEventListener("hashchange", route);
 const go = (s) => (location.hash = `p=${P.id}&s=${s}`);
 
 // ---------- persistence ----------
+// Every edit is saved to the server a moment after you stop typing, so work survives closing the tab
+// and can be continued from any browser that can reach this server.
+const saveState = { inflight: 0, error: null, at: null };
+const deferred = new Map(); // key -> { run, beacon } debounced saves other than patch() (e.g. the script editor)
+const isDirty = () => !!(patch.pending && Object.keys(patch.pending).length) || deferred.size > 0;
+
+async function tracked(fn) {
+  saveState.inflight++;
+  updateSaveUI();
+  try {
+    const r = await fn();
+    saveState.error = null;
+    saveState.at = new Date();
+    return r;
+  } catch (e) {
+    saveState.error = e.message;
+    throw e;
+  } finally {
+    saveState.inflight--;
+    updateSaveUI();
+  }
+}
+
 let saveTimer;
+let patchWaiters = [];
 function patch(body, delay = 500) {
   clearTimeout(saveTimer);
-  patch.pending = { ...(patch.pending || {}), ...body };
+  const id = P.id;
+  if (Object.keys(body).length) patch.pending = { ...(patch.pending || {}), ...body };
+  updateSaveUI();
   return new Promise((res) => {
+    patchWaiters.push(res);
     saveTimer = setTimeout(async () => {
       const b = patch.pending;
+      const waiters = patchWaiters;
       patch.pending = null;
-      try {
-        const p = await api("PATCH", `api/projects/${P.id}`, b);
-        P = { ...p, jobs: p.jobs };
-        renderProjBar();
-        res(P);
-      } catch (e) {
-        toast(e.message, true);
-        res(null);
-      }
+      patchWaiters = [];
+      let out = null;
+      if (b && Object.keys(b).length) {
+        try {
+          const p = await tracked(() => api("PATCH", `api/projects/${id}`, b));
+          if (P?.id === id) {
+            P = { ...p, jobs: p.jobs };
+            renderProjBar();
+          }
+          out = P;
+        } catch (e) {
+          // keep the unsaved edits so "Save now" (or the next edit) retries them
+          patch.pending = { ...b, ...(patch.pending || {}) };
+          toast(`Not saved: ${e.message}`, true);
+          updateSaveUI();
+        }
+      } else out = P;
+      waiters.forEach((w) => w(out));
     }, delay);
   });
 }
-const flush = () => patch({}, 0);
+
+function defer(key, run, beacon, delay = 900) {
+  const prev = deferred.get(key);
+  clearTimeout(prev?.t);
+  const d = { run, beacon, t: setTimeout(() => runDeferred(key), delay) };
+  deferred.set(key, d);
+  updateSaveUI();
+}
+function runDeferred(key) {
+  const d = deferred.get(key);
+  if (!d) return Promise.resolve();
+  clearTimeout(d.t);
+  deferred.delete(key);
+  return tracked(d.run).catch((e) => toast(`Not saved: ${e.message}`, true));
+}
+
+const flush = async () => {
+  await Promise.all([...deferred.keys()].map(runDeferred));
+  return patch({}, 0);
+};
+
+// Last-chance save when the tab is closed, reloaded or sent to the background.
+function beaconSaves() {
+  if (!P) return;
+  if (patch.pending && Object.keys(patch.pending).length) {
+    clearTimeout(saveTimer);
+    fetch(`api/projects/${P.id}`, { method: "PATCH", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch.pending) }).catch(() => {});
+  }
+  for (const [key, d] of deferred) {
+    clearTimeout(d.t);
+    try { d.beacon?.(); } catch {}
+    deferred.delete(key);
+  }
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden" && isDirty()) flush(); });
+window.addEventListener("beforeunload", (e) => {
+  if (!isDirty() && !saveState.inflight) return;
+  beaconSaves();
+  e.preventDefault();
+  e.returnValue = ""; // browser asks "Leave site?" so the final save has time to land
+});
+window.addEventListener("pagehide", beaconSaves);
+
+function updateSaveUI() {
+  const el = document.getElementById("saveStat");
+  if (!el) return;
+  let text, cls;
+  if (saveState.inflight) (text = "Saving…"), (cls = "saving");
+  else if (saveState.error && isDirty()) (text = "Not saved — retry"), (cls = "err");
+  else if (isDirty()) (text = "Unsaved changes…"), (cls = "saving");
+  else if (saveState.at) (text = `Saved ✓ ${saveState.at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`), (cls = "ok");
+  else if (P?.updatedAt) (text = `Saved ✓ ${new Date(P.updatedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`), (cls = "ok");
+  else (text = "Saved ✓"), (cls = "ok");
+  el.textContent = text;
+  el.className = "savestat " + cls;
+  el.title = saveState.error ? `Last error: ${saveState.error}` : "Your work is saved on the BioPicker server automatically as you type.";
+}
+
+async function saveNow() {
+  try {
+    await flush();
+    if (!isDirty()) toast("All changes saved. You can close this tab and continue later from “All biopics”.");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function copyLink() {
+  const url = `${location.origin}${location.pathname}#p=${P.id}&s=${step}`;
+  try {
+    await navigator.clipboard.writeText(url);
+    toast("Link copied. Open it in any browser that can reach this server to continue.");
+  } catch {
+    prompt("Copy this link to continue elsewhere:", url);
+  }
+}
+
+async function downloadBackup() {
+  await flush();
+  const a = h("a", { href: `api/projects/${P.id}/export`, download: "" });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  toast("Downloading a full backup (.zip). Restore it on any BioPicker from the home page.");
+}
+
+async function restoreBackup(file) {
+  if (!file) return;
+  const fd = new FormData();
+  fd.append("backup", file);
+  toast(`Restoring ${file.name}…`);
+  try {
+    const r = await api("POST", "api/projects/import", fd, true);
+    toast(r.copy ? `Restored as a copy: ${r.name}` : `Restored: ${r.name}`);
+    location.hash = `p=${r.id}&s=person`;
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
 
 // ---------- job watching ----------
 const watching = new Set();
@@ -188,8 +325,13 @@ function renderProjBar() {
   bar.append(
     h("span", { class: "muted small" }, "Biopic of"),
     h("b", {}, P.person.name || "Untitled"),
+    h("span", { id: "saveStat", class: "savestat ok", role: "status", "aria-live": "polite" }),
+    h("button", { class: "btn sm", onclick: saveNow, title: "Save everything now (edits also save automatically as you type)" }, "Save now"),
+    h("button", { class: "btn sm ghost", onclick: copyLink, title: "Copy a link to continue this biopic in another browser or device" }, "Copy link"),
+    h("button", { class: "btn sm ghost", onclick: downloadBackup, title: "Download everything (details, photos, scripts, films) as one .zip you can restore anywhere" }, "Download backup"),
     h("button", { class: "btn sm ghost", onclick: () => (location.hash = "") }, "All biopics"),
   );
+  updateSaveUI();
 }
 
 function renderSteps() {
@@ -239,7 +381,6 @@ function aiWarn() {
 function renderHome() {
   renderProjBar();
   renderSteps();
-  const list = recent();
   main.replaceChildren(
     h("div", { class: "hero" },
       h("h1", {}, "Every life is a film."),
@@ -247,13 +388,35 @@ function renderHome() {
       h("div", { class: "row", style: "justify-content:center" },
         h("input", { id: "newName", placeholder: "Whose story? e.g. Grandma Rose Alvarez", style: "max-width:340px" }),
         h("button", { class: "btn primary", onclick: newProject }, "Start a biopic")),
-      list.length
-        ? h("div", { class: "recent" }, h("h3", {}, "Your biopics on this device"),
-            ...list.map((x) => h("a", { href: `#p=${x.id}` }, x.name, h("span", { class: "muted small" }, "  · ", new Date(x.at).toLocaleDateString()))))
-        : null,
+      h("div", { class: "recent", id: "projList" }, h("p", { class: "muted small" }, "Loading your saved biopics…")),
+      h("div", { class: "restore" },
+        h("label", { class: "btn sm ghost" }, "Restore a backup (.zip)…",
+          h("input", { type: "file", accept: ".zip,application/zip", hidden: true, onchange: (e) => restoreBackup(e.target.files[0]) }))),
     ),
   );
+  api("GET", "api/projects")
+    .then(drawProjects)
+    .catch(() => drawProjects(recent().map((x) => ({ id: x.id, name: x.name, updatedAt: new Date(x.at).toISOString() }))));
   $("#newName").addEventListener("keydown", (e) => e.key === "Enter" && newProject());
+}
+
+function drawProjects(list) {
+  const box = document.getElementById("projList");
+  if (!box) return;
+  const ago = (t) => {
+    const d = new Date(t);
+    return isNaN(d) ? "" : d.toLocaleString([], { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+  };
+  const bits = (c) => c ? [c.photos && `${c.photos} photo${c.photos > 1 ? "s" : ""}`, c.events && `${c.events} event${c.events > 1 ? "s" : ""}`, c.answers && `${c.answers} answer${c.answers > 1 ? "s" : ""}`, c.scripts && "script ready", c.films && "film rendered"].filter(Boolean).join(" · ") : "";
+  box.replaceChildren(
+    ...(list.length
+      ? [h("h3", {}, "Your saved biopics — pick up where you left off"),
+         ...list.map((x) => h("a", { href: `#p=${x.id}`, class: "projrow" },
+           x.cover ? h("img", { src: `files/${x.id}/thumbs/${encodeURIComponent(x.cover)}`, alt: "", loading: "lazy" }) : h("span", { class: "ph" }, "🎬"),
+           h("span", { class: "meta" }, h("b", {}, x.name), h("span", { class: "muted small" }, [`Last saved ${ago(x.updatedAt)}`, bits(x.counts)].filter(Boolean).join(" · "))),
+           h("span", { class: "go" }, "Continue →")))]
+      : [h("p", { class: "muted small" }, "No saved biopics yet.")]),
+  );
 }
 
 async function newProject() {
@@ -641,10 +804,13 @@ function thumbFor(v) {
 function vScript() {
   const s = P.scripts[scriptTab];
   const busy = (P.jobs || []).some((j) => ["script", "media"].includes(j.type));
-  const save = (now) => api("PUT", `api/projects/${P.id}/scripts/${scriptTab}`, { title: s.title, tagline: s.tagline, scenes: s.scenes.map((sc) => ({ ...sc, visuals: sc.visuals.map((v, i) => ({ type: v.type, ref: v.ref, caption: v.caption, i })) })) })
-    .then((p) => { P = p; if (now) render(); }).catch((e) => toast(e.message, true));
-  let t;
-  const saveSoon = () => { clearTimeout(t); t = setTimeout(() => save(false), 900); };
+  const sid = P.id;
+  const tab = scriptTab;
+  const url = `api/projects/${sid}/scripts/${tab}`;
+  const body = () => ({ title: s.title, tagline: s.tagline, scenes: s.scenes.map((sc) => ({ ...sc, visuals: sc.visuals.map((v, i) => ({ type: v.type, ref: v.ref, caption: v.caption, i })) })) });
+  const put = () => api("PUT", url, body()).then((p) => { if (P?.id === sid) P = p; });
+  const save = (now) => { deferred.delete(`script:${tab}`); return tracked(put).then(() => { if (now && P?.id === sid) render(); }).catch((e) => toast(`Not saved: ${e.message}`, true)); };
+  const saveSoon = () => defer(`script:${tab}`, put, () => fetch(url, { method: "PUT", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body()) }));
   const write = async () => {
     await flush();
     try {

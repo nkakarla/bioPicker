@@ -142,3 +142,15 @@ video { width: 100%; border-radius: 10px; background: #000; border: 1px solid va
   .ev .x { grid-column: 2; justify-self: end; }
   .job { grid-template-columns: 1fr; }
 }
+
+/* save status, saved-biopic list, restore */
+.savestat { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; }
+.savestat.ok { color: var(--green); border-color: rgba(127, 183, 126, .45); }
+.savestat.saving { color: var(--gold2); border-color: rgba(214, 171, 94, .45); }
+.savestat.err { color: var(--red); border-color: var(--red); }
+.recent a.projrow { display: flex; align-items: center; gap: 12px; }
+.projrow img, .projrow .ph { width: 48px; height: 48px; border-radius: 8px; object-fit: cover; flex: none; display: grid; place-items: center; background: var(--panel2); }
+.projrow .meta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.projrow .go { color: var(--gold2); font-size: 13px; white-space: nowrap; }
+.restore { margin-top: 14px; text-align: center; }
+.restore label { cursor: pointer; }
