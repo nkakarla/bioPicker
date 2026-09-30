@@ -248,6 +248,97 @@ async function downloadBackup() {
   toast("Downloading a full backup (.zip). Restore it on any BioPicker from the home page.");
 }
 
+// ---------- File menu: Word round trip, undo, link, backup ----------
+function fileMenu() {
+  const menu = h("details", { class: "menu" });
+  const item = (label, hint, fn) => h("button", { onclick: () => { menu.open = false; fn(); } }, h("b", {}, label), h("span", {}, hint));
+  const wordInput = h("input", { type: "file", accept: ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document", hidden: true, onchange: (e) => { uploadWord(e.target.files[0]); e.target.value = ""; } });
+  menu.append(
+    h("summary", { class: "btn sm ghost" }, "File ▾"),
+    h("div", { class: "pop" },
+      item("Download Word document", "Everything you've entered, the photos and the scripts, to edit in Word", downloadWord),
+      item("Update from Word…", "Upload the edited .docx; changes are applied and can be undone", () => wordInput.click()),
+      item("Undo a change…", "Go back to before a Word upload or script restore", showHistory),
+      h("hr"),
+      item("Copy link", "Continue this biopic in another browser or device", copyLink),
+      item("Download backup (.zip)", "Everything, including films, to restore on any BioPicker", downloadBackup)),
+    wordInput,
+  );
+  document.addEventListener("click", (e) => { if (!menu.contains(e.target)) menu.open = false; });
+  return menu;
+}
+
+function showDialog(title, ...content) {
+  document.querySelector("dialog.bp")?.remove();
+  const d = h("dialog", { class: "bp" },
+    h("div", { class: "row" }, h("h2", {}, title), h("span", { class: "spacer" }), h("button", { class: "btn sm ghost", "aria-label": "Close", onclick: () => d.close() }, "✕")),
+    ...content);
+  d.addEventListener("close", () => d.remove());
+  document.body.append(d);
+  d.showModal();
+  return d;
+}
+
+async function downloadWord() {
+  await flush();
+  const a = h("a", { href: `api/projects/${P.id}/word`, download: "" });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  toast("Downloading the Word document. Edit it, save it as .docx, then use File → Update from Word.");
+}
+
+async function uploadWord(file) {
+  if (!file) return;
+  await flush();
+  const fd = new FormData();
+  fd.append("doc", file);
+  toast(`Reading ${file.name}…`);
+  try {
+    const r = await api("POST", `api/projects/${P.id}/word`, fd, true);
+    P = r.project;
+    render();
+    watchJobs();
+    const scriptsTouched = r.changes.some((c) => /script/i.test(c));
+    showDialog(r.changes.length ? "Updated from Word" : "Nothing to update",
+      r.changes.length
+        ? h("ul", {}, ...r.changes.map((c) => h("li", {}, c)))
+        : h("p", { class: "muted" }, "The document matches what's already in BioPicker."),
+      r.warnings.length ? h("div", { class: "warnbox" }, h("b", {}, "Please check"), h("ul", {}, ...r.warnings.map((w) => h("li", {}, w)))) : null,
+      scriptsTouched ? h("p", { class: "small" }, "Script changes show up in your films after you render them again. Each render is saved as a new version, and your earlier versions are kept.") : null,
+      h("div", { class: "row end" },
+        r.undo ? h("button", { class: "btn", onclick: async (e) => { e.currentTarget.disabled = true; await undoTo(r.undo.file); document.querySelector("dialog.bp")?.close(); } }, "Undo this upload") : null,
+        scriptsTouched ? h("button", { class: "btn", onclick: () => { document.querySelector("dialog.bp")?.close(); go("render"); } }, "Go to Render →") : null,
+        h("button", { class: "btn primary", onclick: () => document.querySelector("dialog.bp")?.close() }, "OK")));
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function undoTo(file) {
+  try {
+    P = await api("POST", `api/projects/${P.id}/history/${encodeURIComponent(file)}/restore`);
+    render();
+    toast("Undone. (Your state just before the undo was saved too, in case you change your mind.)");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function showHistory() {
+  await flush();
+  let list = [];
+  try { list = await api("GET", `api/projects/${P.id}/history`); } catch (e) { return toast(e.message, true); }
+  showDialog("Undo a change",
+    h("p", { class: "muted small" }, "BioPicker saves an undo point before each Word upload and script restore. Going back restores your details, timeline, photos, interview, series plan and scripts. Rendered films are never removed by an undo."),
+    list.length
+      ? h("div", { class: "hist" }, ...list.map((s) => h("div", { class: "row" },
+          h("span", {}, h("b", {}, new Date(s.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })), h("span", { class: "muted small" }, "  ", s.reason)),
+          h("span", { class: "spacer" }),
+          h("button", { class: "btn sm", onclick: async () => { if (confirm(`Go back to how things were ${s.reason.toLowerCase()}?`)) { await undoTo(s.file); document.querySelector("dialog.bp")?.close(); } } }, "Go back to this"))))
+      : h("p", {}, "No undo points yet."));
+}
+
 async function restoreBackup(file) {
   if (!file) return;
   const fd = new FormData();
@@ -309,7 +400,7 @@ function updateJobUI(j) {
       ),
   );
   const log = $("#renderLog");
-  if (log && j.type === "render") {
+  if (log && j.type === "render" && j.status === "running") {
     log.textContent = (j.log || []).join("\n");
     log.scrollTop = log.scrollHeight;
     const bar = $("#renderBar");
@@ -327,8 +418,7 @@ function renderProjBar() {
     h("b", {}, P.person.name || "Untitled"),
     h("span", { id: "saveStat", class: "savestat ok", role: "status", "aria-live": "polite" }),
     h("button", { class: "btn sm", onclick: saveNow, title: "Save everything now (edits also save automatically as you type)" }, "Save now"),
-    h("button", { class: "btn sm ghost", onclick: copyLink, title: "Copy a link to continue this biopic in another browser or device" }, "Copy link"),
-    h("button", { class: "btn sm ghost", onclick: downloadBackup, title: "Download everything (details, photos, scripts, films) as one .zip you can restore anywhere" }, "Download backup"),
+    fileMenu(),
     h("button", { class: "btn sm ghost", onclick: () => (location.hash = "") }, "All biopics"),
   );
   updateSaveUI();
@@ -781,6 +871,14 @@ function vStyle() {
       h("label", { class: "f" }, "Captions", h("select", { onchange: (e) => set({ burnCaptions: e.target.value === "1" }) }, h("option", { value: "0", selected: !s.burnCaptions }, "Separate .srt file only"), h("option", { value: "1", selected: s.burnCaptions }, "Burn into the video too"))),
     ),
     musicUp,
+    h("h2", { style: "margin-top:18px" }, "Documentary series"),
+    h("div", { class: "card" },
+      h("p", { class: "muted small", style: "margin-top:0" }, "Besides the short and long films, BioPicker can make a multi-episode documentary: the AI splits the life into episodes (childhood, education, career…) and each episode becomes its own film. Plan it on the Script step."),
+      h("div", { class: "grid3" },
+        h("label", { class: "f" }, "Number of episodes", h("select", { onchange: (e) => set({ episodeCount: +e.target.value }) },
+          h("option", { value: 0, selected: !s.episodeCount }, "Let the AI decide (2–8)"),
+          ...Array.from({ length: 11 }, (_, i) => i + 2).map((n) => h("option", { value: n, selected: s.episodeCount === n }, `${n} episodes`)))),
+        h("label", { class: "f" }, "Minutes per episode", h("input", { type: "number", min: 3, max: 30, value: Math.round((s.episodeSeconds || 600) / 60), onchange: (e) => set({ episodeSeconds: Math.max(3, Math.min(30, +e.target.value || 10)) * 60 }) })))),
     h("h2", { style: "margin-top:18px" }, "Narrator"),
     h("div", { class: "card" }, voiceBox),
     nextBtn("script"),
@@ -801,9 +899,83 @@ function thumbFor(v) {
   return h("div", { class: "th" }, { card: "🅣 title card", archival: "🎞 not found yet", still: "📷 not found yet", art: "🖼 not found yet", photo: "📷", map: "🗺" }[v.type] || v.type);
 }
 
+const vLabel = (v) => (v === "short" ? "Short version" : v === "long" ? "Long version" : `Episode ${v.slice(2)}`);
+const episodes = () => P.series?.episodes || [];
+const fmtDur = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
+
+function scriptTabs() {
+  const tab = (v, label) => h("button", { class: scriptTab === v ? "on" : "", onclick: () => { scriptTab = v; render(); } }, label, P.scripts[v] ? " ✓" : "");
+  return h("div", { class: "tabs" },
+    tab("short", `Short · ${P.settings.shortSeconds}s`),
+    tab("long", `Long · ${Math.round(P.settings.longSeconds / 60)} min`),
+    h("span", { class: "sep" }),
+    h("button", { class: scriptTab === "series" ? "on" : "", onclick: () => { scriptTab = "series"; render(); } }, "📺 Series plan"),
+    ...episodes().map((e) => tab(`ep${e.n}`, `Ep ${e.n}`)));
+}
+
+function seriesView() {
+  const eps = episodes();
+  const jobs = P.jobs || [];
+  const planning = jobs.some((j) => j.type === "series");
+  const writing = jobs.some((j) => j.type === "script");
+  const mins = Math.round(P.settings.episodeSeconds / 60);
+  const sid = P.id;
+  const body = () => ({ title: P.series?.title || "", episodes: episodes().map(({ title, logline, from, to }) => ({ title, logline, from, to })) });
+  const put = () => api("PUT", `api/projects/${sid}/series`, body()).then((p) => { if (P?.id === sid) P = p; });
+  const saveSoon = () => defer("series", put, () => fetch(`api/projects/${sid}/series`, { method: "PUT", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body()) }));
+  const saveNowAndRender = async () => { deferred.delete("series"); await tracked(put).catch((e) => toast(e.message, true)); render(); };
+  const startJobBtn = async (url, b) => { try { await flush(); const r = await api("POST", url, b); for (const j of [].concat(r)) { updateJobUI(j); watchJob(j); } P.jobs = [...(P.jobs || []), ...[].concat(r)]; render(); } catch (e) { toast(e.message, true); } };
+  const plan = () => {
+    if (eps.some((e) => P.scripts[`ep${e.n}`]) && !confirm("Re-planning replaces the episode list. Episode scripts already written are kept, but may no longer match. Continue?")) return;
+    startJobBtn(`api/projects/${P.id}/series/plan`);
+  };
+  const missing = eps.filter((e) => !P.scripts[`ep${e.n}`]).length;
+  const unrendered = eps.filter((e) => P.scripts[`ep${e.n}`] && !P.renders[`ep${e.n}`]).length;
+  return h("section", {},
+    h("h1", {}, "Script & media"),
+    h("p", { class: "lead" }, `A documentary series tells the life in episodes of about ${mins} minutes. The AI proposes the episodes; rename them, reword what each covers, then write and render each one as its own film.`),
+    aiWarn(),
+    scriptTabs(),
+    h("div", { class: "card" },
+      h("div", { class: "row" },
+        h("button", { class: "btn primary", disabled: planning || !health.ai, onclick: plan }, planning ? "Planning…" : eps.length ? "Re-plan the series with AI" : "✨ Plan the series with AI"),
+        h("span", { class: "muted small" }, `${P.settings.episodeCount ? P.settings.episodeCount + " episodes" : "AI picks the number of episodes"} · ~${mins} min each · `, h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("style"); } }, "change")),
+        h("span", { class: "spacer" }))),
+    eps.length
+      ? h("div", {},
+          h("div", { class: "card" }, h("label", { class: "f" }, "Series title", h("input", { value: P.series.title || "", oninput: (e) => { P.series.title = e.target.value; saveSoon(); } }))),
+          h("div", { class: "eps" }, ...eps.map((e) => {
+            const v = `ep${e.n}`;
+            const s = P.scripts[v];
+            const r = P.renders[v];
+            return h("div", { class: "ep" },
+              h("div", { class: "num" }, e.n),
+              h("div", { class: "body" },
+                h("input", { value: e.title, placeholder: "Episode title", oninput: (ev) => { e.title = ev.target.value; saveSoon(); } }),
+                h("textarea", { rows: 2, placeholder: "What this episode covers", oninput: (ev) => { e.logline = ev.target.value; saveSoon(); } }, e.logline || ""),
+                h("span", { class: "muted small" }, [e.from && `${e.from}${e.to && e.to !== e.from ? "–" + e.to : ""}`, s ? `script ✓ (${s.scenes.length} scenes)` : "no script yet", r ? `rendered v${r.n} · ${fmtDur(r.seconds)}` : null].filter(Boolean).join(" · "))),
+              h("div", { class: "acts" },
+                h("button", { class: "btn sm", onclick: () => { scriptTab = v; render(); } }, s ? "Edit script" : "Open"),
+                r ? h("button", { class: "btn sm", onclick: () => go("render") }, "▶ Watch") : null));
+          })),
+          h("div", { class: "row", style: "margin-top:12px" },
+            h("button", { class: "btn sm", disabled: eps.length >= 20, onclick: () => { P.series.episodes.push({ n: eps.length + 1, title: `Episode ${eps.length + 1}`, logline: "", from: "", to: "", eventIds: [] }); saveNowAndRender(); } }, "+ Add episode"),
+            h("button", { class: "btn sm ghost", disabled: eps.length <= 1, onclick: () => { const last = eps.at(-1); if (!confirm(`Remove episode ${last.n} "${last.title}"${P.scripts[`ep${last.n}`] ? " and its script" : ""}? Films already rendered are kept.`)) return; P.series.episodes.pop(); saveNowAndRender(); } }, "Remove last episode"),
+            h("span", { class: "spacer" }),
+            h("button", { class: "btn", disabled: writing || !missing || !health.ai, onclick: () => startJobBtn(`api/projects/${P.id}/series/write-all`) }, writing ? "Writing…" : missing ? `Write ${missing} missing script${missing > 1 ? "s" : ""}` : "All scripts written"),
+            h("button", { class: "btn primary", disabled: !unrendered, onclick: async () => { await startJobBtn(`api/projects/${P.id}/series/render-all`); go("render"); } }, unrendered ? `Render ${unrendered} episode${unrendered > 1 ? "s" : ""} →` : "Render →")))
+      : h("div", { class: "card muted" }, planning ? "Planning the episodes…" : "No series planned yet."),
+  );
+}
+
 function vScript() {
+  if (scriptTab === "series" || (scriptTab.startsWith("ep") && !episodes().some((e) => `ep${e.n}` === scriptTab))) {
+    scriptTab = "series";
+    return seriesView();
+  }
   const s = P.scripts[scriptTab];
-  const busy = (P.jobs || []).some((j) => ["script", "media"].includes(j.type));
+  const ep = episodes().find((e) => `ep${e.n}` === scriptTab);
+  const busy = (P.jobs || []).some((j) => ["script", "media"].includes(j.type) && (!j.version || j.version === scriptTab));
   const sid = P.id;
   const tab = scriptTab;
   const url = `api/projects/${sid}/scripts/${tab}`;
@@ -824,9 +996,11 @@ function vScript() {
     h("h1", {}, "Script & media"),
     h("p", { class: "lead" }, "Claude writes the narration and picks the pictures: your photos, maps of each place, and public-domain newsreels, historic photos and art. Edit any line, swap any clip, then render."),
     aiWarn(),
-    h("div", { class: "tabs" }, ...["short", "long"].map((v) => h("button", { class: scriptTab === v ? "on" : "", onclick: () => { scriptTab = v; render(); } }, `${v === "short" ? "Short" : "Long"} version · ${v === "short" ? P.settings.shortSeconds : P.settings.longSeconds}s`))),
+    scriptTabs(),
+    ep ? h("div", { class: "card" }, h("b", {}, `Episode ${ep.n}: ${ep.title}`), ep.from ? h("span", { class: "muted small" }, `  ·  ${ep.from}${ep.to && ep.to !== ep.from ? "–" + ep.to : ""}`) : null, h("div", { class: "muted small" }, ep.logline)) : null,
+    s && P.renders[scriptTab] ? h("p", { class: "small muted" }, `Already rendered as v${P.renders[scriptTab].n}. Edit freely: the next render is saved as v${P.renders[scriptTab].n + 1} and earlier versions are kept.`) : null,
     h("div", { class: "row", style: "margin-bottom:14px" },
-      h("button", { class: "btn primary", disabled: busy || !health.ai, onclick: write }, s ? "Rewrite script" : `Write the ${scriptTab} script`),
+      h("button", { class: "btn primary", disabled: busy || !health.ai, onclick: () => { if (s && !confirm(`Rewrite the whole ${vLabel(scriptTab)} script with AI? Your edits to it will be replaced (rendered films keep their own copy of the script).`)) return; write(); } }, s ? "Rewrite script" : `Write the ${vLabel(scriptTab).toLowerCase()} script`),
       s ? h("button", { class: "btn", disabled: busy, onclick: async () => { const j = await api("POST", `api/projects/${P.id}/scripts/${scriptTab}/media`); updateJobUI(j); watchJob(j); } }, "Re-find media") : null,
       s ? h("span", { class: "muted small" }, `${s.scenes.length} scenes · ${words} words ≈ ${Math.round(words / 2.4)}s narration · tone: ${s.tone}${s.mediaResolvedAt ? "" : " · media needs refresh"}`) : null,
       h("span", { class: "spacer" }),
@@ -870,6 +1044,7 @@ function vScript() {
               ),
             ),
           ),
+          h("div", { class: "row" }, h("button", { class: "btn sm", onclick: () => { s.scenes.push({ kind: "life", narration: "", onScreenTitle: "", onScreenSubtitle: "", year: "", place: "", transition: "fade", visuals: [{ type: "card", ref: "New scene", caption: "" }] }); save(true); } }, "+ Add scene at the end")),
           h("p", { class: "muted small" }, "Added or changed visuals are looked up when you click “Re-find media” (or automatically at render time)."),
         )
       : h("div", { class: "card muted" }, busy ? "Writing…" : "No script yet for this version."),
@@ -877,32 +1052,86 @@ function vScript() {
 }
 
 // ---------- 8. render ----------
+const playing = {}; // version -> film id shown in that version's player
 function vRender() {
-  const running = (P.jobs || []).find((j) => j.type === "render");
+  const jobs = P.jobs || [];
+  const running = jobs.find((j) => j.type === "render" && j.status === "running");
+  const queuedFor = (v) => jobs.find((j) => j.type === "render" && j.version === v);
+  const startRender = async (v) => {
+    try {
+      await flush();
+      const j = await api("POST", `api/projects/${P.id}/render/${v}`);
+      updateJobUI(j);
+      P.jobs = [...(P.jobs || []), j];
+      render();
+      watchJob(j);
+    } catch (e) { toast(e.message, true); }
+  };
+  const act = async (fn, msg) => { try { P = await fn(); render(); if (msg) toast(msg); } catch (e) { toast(e.message, true); } };
+
+  const filmCard = (v) => {
+    const s = P.scripts[v];
+    const films = P.films.filter((f) => f.version === v).sort((a, b) => b.n - a.n);
+    const cur = films.find((f) => f.id === playing[v]) || films[0];
+    const q = queuedFor(v);
+    const ep = episodes().find((e) => `ep${e.n}` === v);
+    const changedAt = s?.updatedAt || s?.createdAt;
+    const edited = s && cur && changedAt && new Date(changedAt) > new Date(cur.at);
+    return h("div", { class: "card" },
+      h("div", { class: "row" },
+        h("h2", { style: "margin:0" }, vLabel(v), ep ? h("span", { class: "muted", style: "font-weight:400" }, `: ${ep.title}`) : !ep && s?.title ? h("span", { class: "muted", style: "font-weight:400" }, `: ${s.title}`) : null),
+        h("span", { class: "spacer" }),
+        s ? h("button", { class: "btn", onclick: () => { scriptTab = v; go("script"); } }, "✎ Edit script") : null,
+        s ? h("button", { class: "btn primary", disabled: !!q, onclick: () => startRender(v) }, q ? (q.status === "queued" ? "Queued…" : "Rendering…") : films.length ? `Render v${films[0].n + 1}` : "Render")
+          : h("button", { class: "btn", onclick: () => { scriptTab = v; go("script"); } }, "Write this script first")),
+      cur
+        ? h("div", { style: "margin-top:12px" },
+            h("video", { controls: true, preload: "metadata", src: fileUrl("output", cur.file) + `?t=${encodeURIComponent(cur.at)}` },
+              cur.vtt ? h("track", { kind: "captions", src: fileUrl("output", cur.vtt), srclang: P.person.language || "en", label: "Captions" }) : null),
+            h("div", { class: "row", style: "margin-top:8px" },
+              h("b", {}, `v${cur.n}${cur.label ? " · " + cur.label : ""}`),
+              h("span", { class: "muted small" }, `${fmtDur(cur.seconds)} · ${cur.quality} · ${new Date(cur.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`),
+              h("span", { class: "spacer" }),
+              h("a", { class: "btn sm", href: fileUrl("output", cur.file) + "?download=1" }, "⬇ MP4"),
+              h("a", { class: "btn sm", href: fileUrl("output", cur.srt) + "?download=1" }, "⬇ Captions")),
+            edited && cur === films[0] ? h("p", { class: "small muted" }, "The script may have changed since this render. Render again to see your edits; this version stays.") : null,
+            films.length
+              ? h("table", { class: "films" },
+                  h("thead", {}, h("tr", {}, h("th", {}, "Version"), h("th", {}, "Rendered"), h("th", {}, "Length"), h("th", {}, "Name / note"), h("th", {}, ""))),
+                  h("tbody", {}, ...films.map((f) => h("tr", { class: f === cur ? "cur" : "" },
+                    h("td", {}, h("b", {}, `v${f.n}`), f === films[0] ? h("span", { class: "muted small" }, " latest") : null),
+                    h("td", {}, new Date(f.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })),
+                    h("td", {}, fmtDur(f.seconds)),
+                    h("td", {}, h("input", { value: f.label || "", placeholder: "e.g. sent to family", onchange: (e) => act(() => api("PATCH", `api/projects/${P.id}/films/${f.id}`, { label: e.target.value })) })),
+                    h("td", {}, h("div", { class: "acts" },
+                      f === cur ? h("span", { class: "muted small" }, "playing") : h("button", { class: "btn sm", onclick: () => { playing[v] = f.id; render(); } }, "▶ Play"),
+                      h("a", { class: "btn sm", href: fileUrl("output", f.file) + "?download=1", title: "Download this version" }, "⬇"),
+                      f.hasScript ? h("button", { class: "btn sm", title: "Put this version's script back in the editor", onclick: () => { if (confirm(`Replace the current ${vLabel(v)} script with the one used for v${f.n}? (You can undo this from File → Undo a change.)`)) act(() => api("POST", `api/projects/${P.id}/films/${f.id}/restore-script`), `v${f.n}'s script is back in the editor.`); } }, "↺ Use this script") : null,
+                      h("button", { class: "btn sm danger", title: "Delete this version", onclick: () => { if (confirm(`Delete ${vLabel(v)} v${f.n}${f.label ? ` (${f.label})` : ""}? The video file is removed for good.`)) { delete playing[v]; act(() => api("DELETE", `api/projects/${P.id}/films/${f.id}`), `v${f.n} deleted.`); } } }, "🗑")))))))
+              : null)
+        : h("p", { class: "muted" }, s ? "Not rendered yet." : ""),
+    );
+  };
+
+  const eps = episodes().map((e) => `ep${e.n}`);
+  const orphans = [...new Set(P.films.map((f) => f.version))].filter((v) => !["short", "long", ...eps].includes(v));
+  const unrendered = eps.filter((v) => P.scripts[v] && !P.renders[v] && !queuedFor(v)).length;
   return h("section", {},
     h("h1", {}, "Render the film"),
-    h("p", { class: "lead" }, "Narration is recorded, photos get the Ken Burns treatment, maps fly to each place, newsreels and art are cut in, and the score ducks under the voice. Rendering takes a few minutes (longer for the long version)."),
+    h("p", { class: "lead" }, "Narration is recorded, photos get the Ken Burns treatment, maps fly to each place, newsreels and art are cut in, and the score ducks under the voice. Every render is kept as a new version (v1, v2, …) until you delete it, so you can edit the script and render again without losing anything."),
     running ? h("div", { class: "card" }, h("b", {}, running.label), h("div", { class: "progress", style: "margin:10px 0" }, h("div", { id: "renderBar", style: `width:${Math.round(running.progress * 100)}%` })), h("div", { class: "log", id: "renderLog" }, (running.log || []).join("\n"))) : null,
-    ...["short", "long"].map((v) => {
-      const s = P.scripts[v];
-      const r = P.renders[v];
-      return h("div", { class: "card" },
-        h("div", { class: "row" },
-          h("h2", {}, v === "short" ? "Short version" : "Long version"),
-          h("span", { class: "spacer" }),
-          s ? h("button", { class: "btn primary", disabled: !!running, onclick: async () => { try { await flush(); const j = await api("POST", `api/projects/${P.id}/render/${v}`); updateJobUI(j); P.jobs = [...(P.jobs || []), j]; render(); watchJob(j); } catch (e) { toast(e.message, true); } } }, r ? "Re-render" : "Render")
-            : h("button", { class: "btn", onclick: () => { scriptTab = v; go("script"); } }, "Write this script first")),
-        r
-          ? h("div", {},
-              h("video", { controls: true, preload: "metadata", src: fileUrl("output", r.file) + `?t=${encodeURIComponent(r.at)}` },
-                r.vtt ? h("track", { kind: "captions", src: fileUrl("output", r.vtt), srclang: P.person.language || "en", label: "Captions" }) : null),
-              h("div", { class: "row", style: "margin-top:10px" },
-                h("a", { class: "btn", href: fileUrl("output", r.file) + "?download=1" }, "⬇ Download MP4"),
-                h("a", { class: "btn", href: fileUrl("output", r.srt) + "?download=1" }, "⬇ Captions (.srt)"),
-                h("span", { class: "muted small" }, `${r.seconds}s · ${r.quality} · ${new Date(r.at).toLocaleString()}`)))
-          : h("p", { class: "muted" }, s ? "Not rendered yet." : ""),
-      );
-    }),
+    filmCard("short"),
+    filmCard("long"),
+    eps.length
+      ? h("div", {},
+          h("div", { class: "group-h" },
+            h("h2", { style: "margin:0" }, "📺 ", P.series.title || "Documentary series"),
+            h("span", { class: "muted small" }, `${eps.length} episodes`),
+            h("span", { class: "spacer" }),
+            unrendered ? h("button", { class: "btn primary", onclick: async () => { try { await flush(); const r = await api("POST", `api/projects/${P.id}/series/render-all`); for (const j of r) { updateJobUI(j); watchJob(j); } P.jobs = [...(P.jobs || []), ...r]; render(); toast(`${r.length} episode(s) queued; they render one after another.`); } catch (e) { toast(e.message, true); } } }, `Render ${unrendered} unrendered episode${unrendered > 1 ? "s" : ""}`) : null),
+          ...eps.map(filmCard))
+      : h("div", { class: "card muted small" }, "Want a multi-episode documentary? ", h("a", { href: "#", onclick: (e) => { e.preventDefault(); scriptTab = "series"; go("script"); } }, "Plan a series"), " on the Script step."),
+    ...orphans.map(filmCard),
   );
 }
 

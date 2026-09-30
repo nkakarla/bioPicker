@@ -11,7 +11,11 @@ import { activeJobs, getJob, startJob } from "./lib/jobs.js";
 import { fetchImage, fetchVideoClip } from "./lib/media.js";
 import { deletePhotoFiles, ingestPhoto } from "./lib/photos.js";
 import { renderFilm, resolveMedia } from "./lib/produce.js";
-import { createProject, emptyProject, exportProject, importProject, listProjects, loadProject, projectPath, saveProject } from "./lib/store.js";
+import {
+  VERSION_RE, createProject, emptyProject, exportProject, importProject, listProjects, listSnapshots, loadProject, projectPath,
+  restoreSnapshot, saveProject, snapshotProject, syncRenders,
+} from "./lib/store.js";
+import { applyDocx, buildDocx, parseDocx, versionLabel } from "./lib/word.js";
 import { readZip, writeZip } from "./lib/zip.js";
 import { castingShortlist, listVoices, synthesize } from "./lib/tts.js";
 import { DATA_DIR, ROOT, ensureDir, newId, sortByDate } from "./lib/util.js";
@@ -51,8 +55,15 @@ const wrap = (fn) => (req, res) =>
   });
 
 const P = (req) => loadProject(req.params.id);
-const publicProject = (p) => ({ ...p, jobs: activeJobs(p.id).map(jobView) });
-const jobView = (j) => ({ id: j.id, type: j.type, label: j.label, status: j.status, progress: j.progress, error: j.error, log: j.log.slice(-40) });
+// films carry a full script snapshot each; the browser only needs to know one exists
+const publicFilm = ({ scriptSnapshot, ...f }) => ({ ...f, hasScript: !!scriptSnapshot });
+const publicProject = (p) => ({
+  ...p,
+  films: p.films.map(publicFilm),
+  renders: Object.fromEntries(Object.entries(p.renders).map(([v, f]) => [v, publicFilm(f)])),
+  jobs: activeJobs(p.id).map(jobView),
+});
+const jobView = (j) => ({ id: j.id, type: j.type, version: j.version, label: j.label, status: j.status, progress: j.progress, error: j.error, log: j.log.slice(-40) });
 const needAI = () => {
   if (!ai.aiConfigured()) throw Object.assign(new Error("AI is not configured on this server (ANTHROPIC_API_KEY)."), { status: 503 });
 };
@@ -80,7 +91,7 @@ app.post("/api/projects/import", importUpload.single("backup"), wrap(async (req,
 app.get("/api/projects/:id", wrap(async (req, res) => res.json(publicProject(P(req)))));
 
 const PERSON_KEYS = Object.keys(emptyProject("x").person);
-const SETTING_KEYS = ["tone", "quality", "shortSeconds", "longSeconds", "voice", "music", "burnCaptions", "includeArchival", "includeArt"];
+const SETTING_KEYS = ["tone", "quality", "shortSeconds", "longSeconds", "voice", "music", "burnCaptions", "includeArchival", "includeArt", "episodeCount", "episodeSeconds"];
 
 app.patch("/api/projects/:id", wrap(async (req, res) => {
   const p = P(req);
@@ -90,6 +101,8 @@ app.patch("/api/projects/:id", wrap(async (req, res) => {
     for (const k of SETTING_KEYS) if (k in b.settings) p.settings[k] = b.settings[k];
     p.settings.shortSeconds = Math.max(30, Math.min(300, Number(p.settings.shortSeconds) || 90));
     p.settings.longSeconds = Math.max(120, Math.min(1800, Number(p.settings.longSeconds) || 360));
+    p.settings.episodeCount = Math.max(0, Math.min(20, Math.round(Number(p.settings.episodeCount) || 0)));
+    p.settings.episodeSeconds = Math.max(180, Math.min(1800, Number(p.settings.episodeSeconds) || 600));
     if (!["serious", "humorous", "teachable"].includes(p.settings.tone)) p.settings.tone = "serious";
     if (!["480p", "720p", "1080p"].includes(p.settings.quality)) p.settings.quality = "720p";
   }
@@ -156,28 +169,32 @@ app.post("/api/projects/:id/photos", upload.array("photos", 200), wrap(async (re
   }
   p.photos.push(...added);
   saveProject(p);
-  if (added.length && ai.aiConfigured()) {
-    startJob({ projectId: p.id, type: "photos", label: `Analysing ${added.length} photo(s)` }, async ({ log, progress }) => {
-      let n = 0;
-      const ids = added.map((a) => a.id);
-      await Promise.all([0, 1, 2].map(async (w) => {
-        for (let i = w; i < ids.length; i += 3) {
-          const ph = p.photos.find((x) => x.id === ids[i]);
-          if (!ph) continue;
-          try {
-            ph.ai = await ai.analyzePhoto(p, ph);
-            if (!ph.caption) ph.caption = ph.ai.suggestedCaption;
-          } catch (e) {
-            log(`${ph.originalName}: ${e.message}`);
-          }
-          progress(++n / ids.length);
-        }
-      }));
-      saveProject(p);
-    });
-  }
+  analyzePhotos(p, added);
   res.json({ project: publicProject(p), errors });
 }));
+
+/** Background AI look at newly added photos (description, caption, focal point). */
+function analyzePhotos(p, added) {
+  if (!added.length || !ai.aiConfigured()) return;
+  startJob({ projectId: p.id, type: "photos", label: `Analysing ${added.length} photo(s)` }, async ({ log, progress }) => {
+    let n = 0;
+    const ids = added.map((a) => a.id);
+    await Promise.all([0, 1, 2].map(async (w) => {
+      for (let i = w; i < ids.length; i += 3) {
+        const ph = p.photos.find((x) => x.id === ids[i]);
+        if (!ph) continue;
+        try {
+          ph.ai = await ai.analyzePhoto(p, ph);
+          if (!ph.caption) ph.caption = ph.ai.suggestedCaption;
+        } catch (e) {
+          log(`${ph.originalName}: ${e.message}`);
+        }
+        progress(++n / ids.length);
+      }
+    }));
+    saveProject(p);
+  });
+}
 
 app.delete("/api/projects/:id/photos/:pid", wrap(async (req, res) => {
   const p = P(req);
@@ -308,36 +325,111 @@ app.delete("/api/projects/:id/music/:mid", wrap(async (req, res) => {
 }));
 
 // ---------- scripts ----------
-const VERSIONS = ["short", "long"];
+// versions: "short", "long", or a documentary-series episode "ep1".."ep20"
 const checkVersion = (v) => {
-  if (!VERSIONS.includes(v)) throw Object.assign(new Error("version must be short or long"), { status: 400 });
+  if (!VERSION_RE.test(v)) throw Object.assign(new Error("version must be short, long or ep1..ep20"), { status: 400 });
   return v;
 };
+const episodeOf = (p, v) => (v.startsWith("ep") ? p.series?.episodes?.find((e) => e.n === Number(v.slice(2))) || null : null);
+const secondsFor = (p, v) => (v === "short" ? p.settings.shortSeconds : v === "long" ? p.settings.longSeconds : p.settings.episodeSeconds);
+const busyWith = (p, type, version) => activeJobs(p.id).some((j) => j.type === type && (!version || j.version === version));
+
+/** Writes (or rewrites) one version's script and finds its media. */
+async function writeVersionScript(p, version, { log, progress = () => {} }) {
+  const episode = episodeOf(p, version);
+  if (version.startsWith("ep") && !episode) throw new Error(`Episode ${version.slice(2)} isn't in the series plan.`);
+  const secs = secondsFor(p, version);
+  log(`Writing a ${p.settings.tone} script for ${versionLabel(version)}${episode ? ` "${episode.title}"` : ""} (~${Math.round(secs / 60)} min)…`);
+  const s = await ai.writeScript(p, version, secs, episode);
+  const { words } = ai.wordBudget(secs, p.settings.voice?.rate);
+  const count = () => s.scenes.reduce((a, sc) => a + String(sc.narration).split(/\s+/).filter(Boolean).length, 0);
+  for (let pass = 0; pass < 2 && count() > words * 1.1; pass++) {
+    log(`Script has ${count()} words; tightening to ~${words}…`);
+    await ai.tightenScript(s, words);
+  }
+  for (const sc of s.scenes) sc.id = newId(6);
+  p.scripts[version] = { ...s, version, targetSeconds: secs, tone: p.settings.tone, createdAt: new Date().toISOString(), mediaResolvedAt: null };
+  saveProject(p);
+  progress(0.4);
+  log("Finding public-domain footage, art and music…");
+  await resolveMedia(p, version, log);
+}
 
 app.post("/api/projects/:id/scripts/:version", wrap(async (req, res) => {
   needAI();
   const p = P(req);
   const version = checkVersion(req.params.version);
-  const secs = version === "short" ? p.settings.shortSeconds : p.settings.longSeconds;
-  const job = startJob({ projectId: p.id, type: "script", label: `Writing the ${version} version` }, async ({ log, progress }) => {
-    log(`Writing a ${p.settings.tone} ${version} script (~${secs}s)…`);
+  if (version.startsWith("ep") && !episodeOf(p, version)) throw Object.assign(new Error("Plan the series first."), { status: 400 });
+  if (busyWith(p, "script", version)) throw Object.assign(new Error(`${versionLabel(version)} is already being written.`), { status: 409 });
+  const job = startJob({ projectId: p.id, type: "script", version, label: `Writing ${versionLabel(version)}` }, async ({ log, progress }) => {
     progress(0.05);
-    const s = await ai.writeScript(p, version, secs);
-    const { words } = ai.wordBudget(secs, p.settings.voice?.rate);
-    const count = () => s.scenes.reduce((a, sc) => a + String(sc.narration).split(/\s+/).filter(Boolean).length, 0);
-    for (let pass = 0; pass < 2 && count() > words * 1.1; pass++) {
-      log(`Script has ${count()} words; tightening to ~${words}…`);
-      await ai.tightenScript(s, words);
-    }
-    for (const sc of s.scenes) sc.id = newId(6);
-    p.scripts[version] = { ...s, version, targetSeconds: secs, tone: p.settings.tone, createdAt: new Date().toISOString(), mediaResolvedAt: null };
-    saveProject(p);
-    progress(0.4);
-    log("Finding public-domain footage, art and music…");
-    await resolveMedia(p, version, log);
+    await writeVersionScript(p, version, { log, progress });
     progress(1);
   });
   res.json(jobView(job));
+}));
+
+// ---------- documentary series ----------
+app.post("/api/projects/:id/series/plan", wrap(async (req, res) => {
+  needAI();
+  const p = P(req);
+  if (!p.timeline.length && !p.interview.some((q) => q.answer)) throw Object.assign(new Error("Add some timeline events or interview answers first, so there is a story to split into episodes."), { status: 400 });
+  if (busyWith(p, "series")) throw Object.assign(new Error("The series is already being planned."), { status: 409 });
+  const job = startJob({ projectId: p.id, type: "series", label: "Planning the documentary series" }, async ({ log, progress }) => {
+    const count = p.settings.episodeCount;
+    log(`Planning ${count || "the right number of"} episodes of ~${Math.round(p.settings.episodeSeconds / 60)} min…`);
+    progress(0.1);
+    const plan = await ai.planSeries(p, count, p.settings.episodeSeconds);
+    const episodes = plan.episodes.slice(0, 20).map((e, i) => ({ n: i + 1, title: e.title, logline: e.logline, from: e.from, to: e.to, eventIds: e.eventIds }));
+    p.series = { title: plan.title, episodes, createdAt: new Date().toISOString() };
+    saveProject(p);
+    log(`Planned ${episodes.length} episodes: ${episodes.map((e) => e.title).join(" · ")}`);
+    progress(1);
+  });
+  res.json(jobView(job));
+}));
+
+app.put("/api/projects/:id/series", wrap(async (req, res) => {
+  const p = P(req);
+  const b = req.body || {};
+  if (!p.series) p.series = { title: "", episodes: [], createdAt: new Date().toISOString() };
+  if ("title" in b) p.series.title = String(b.title || "").slice(0, 200);
+  if (Array.isArray(b.episodes)) {
+    // edit titles/loglines, or append/remove at the end (episode numbers stay stable for existing scripts)
+    p.series.episodes = b.episodes.slice(0, 20).map((e, i) => {
+      const o = p.series.episodes[i] || { eventIds: [], from: "", to: "" };
+      return { ...o, n: i + 1, title: String(e.title ?? o.title ?? "").slice(0, 200), logline: String(e.logline ?? o.logline ?? "").slice(0, 1000), from: String(e.from ?? o.from ?? "").slice(0, 20), to: String(e.to ?? o.to ?? "").slice(0, 20) };
+    });
+    // scripts of removed episodes go too; their rendered films stay until deleted
+    for (const v of Object.keys(p.scripts)) if (v.startsWith("ep") && Number(v.slice(2)) > p.series.episodes.length) delete p.scripts[v];
+  }
+  saveProject(p);
+  res.json(publicProject(p));
+}));
+
+app.post("/api/projects/:id/series/write-all", wrap(async (req, res) => {
+  needAI();
+  const p = P(req);
+  const eps = p.series?.episodes || [];
+  const todo = eps.filter((e) => req.body?.all || !p.scripts[`ep${e.n}`]).map((e) => `ep${e.n}`);
+  if (!todo.length) throw Object.assign(new Error(eps.length ? "Every episode already has a script." : "Plan the series first."), { status: 400 });
+  if (busyWith(p, "script")) throw Object.assign(new Error("A script is already being written; try again when it finishes."), { status: 409 });
+  const job = startJob({ projectId: p.id, type: "script", label: `Writing ${todo.length} episode script(s)` }, async ({ log, progress }) => {
+    for (const [i, v] of todo.entries()) {
+      await writeVersionScript(p, v, { log, progress: (x) => progress((i + x) / todo.length) });
+      progress((i + 1) / todo.length);
+    }
+    log(`All ${todo.length} episode scripts written.`);
+  });
+  res.json(jobView(job));
+}));
+
+app.post("/api/projects/:id/series/render-all", wrap(async (req, res) => {
+  const p = P(req);
+  const todo = (p.series?.episodes || []).map((e) => `ep${e.n}`).filter((v) => p.scripts[v] && !busyWith(p, "render", v) && (req.body?.all || !p.renders[v]));
+  if (!todo.length) throw Object.assign(new Error("No episodes to render: write the episode scripts first (already-rendered ones are skipped)."), { status: 400 });
+  const jobs = todo.map((v) => startJob({ projectId: p.id, type: "render", lane: "render", version: v, label: `Rendering ${versionLabel(v)}` }, ({ log, progress }) => renderFilm(p, v, { log, progress })));
+  res.json(jobs.map(jobView));
 }));
 
 app.put("/api/projects/:id/scripts/:version", wrap(async (req, res) => {
@@ -346,6 +438,7 @@ app.put("/api/projects/:id/scripts/:version", wrap(async (req, res) => {
   const cur = p.scripts[version];
   if (!cur) throw Object.assign(new Error("No script"), { status: 404 });
   const b = req.body || {};
+  cur.updatedAt = new Date().toISOString();
   for (const k of ["title", "tagline"]) if (k in b) cur[k] = String(b[k] || "").slice(0, 300);
   if (Array.isArray(b.scenes)) {
     const old = Object.fromEntries(cur.scenes.map((s) => [s.id, s]));
@@ -408,10 +501,77 @@ app.post("/api/projects/:id/render/:version", wrap(async (req, res) => {
   const p = P(req);
   const version = checkVersion(req.params.version);
   if (!p.scripts[version]) throw Object.assign(new Error("Write the script first."), { status: 400 });
-  if (activeJobs(p.id).some((j) => j.type === "render")) throw Object.assign(new Error("A render is already running for this project."), { status: 409 });
-  const job = startJob({ projectId: p.id, type: "render", lane: "render", label: `Rendering the ${version} film` }, ({ log, progress }) =>
+  if (busyWith(p, "render", version)) throw Object.assign(new Error(`${versionLabel(version)} is already rendering or queued.`), { status: 409 });
+  const job = startJob({ projectId: p.id, type: "render", lane: "render", version, label: `Rendering ${versionLabel(version)}` }, ({ log, progress }) =>
     renderFilm(p, version, { log, progress }));
   res.json(jobView(job));
+}));
+
+// ---------- film versions (every render is kept until deleted) ----------
+const filmOf = (p, fid) => {
+  const f = p.films.find((x) => x.id === fid);
+  if (!f) throw Object.assign(new Error("That film version no longer exists."), { status: 404 });
+  return f;
+};
+app.patch("/api/projects/:id/films/:fid", wrap(async (req, res) => {
+  const p = P(req);
+  const f = filmOf(p, req.params.fid);
+  if ("label" in (req.body || {})) f.label = String(req.body.label || "").slice(0, 120);
+  saveProject(p);
+  res.json(publicProject(p));
+}));
+app.delete("/api/projects/:id/films/:fid", wrap(async (req, res) => {
+  const p = P(req);
+  const f = filmOf(p, req.params.fid);
+  p.films = p.films.filter((x) => x !== f);
+  const stillUsed = new Set(p.films.flatMap((x) => [x.file, x.srt, x.vtt]));
+  for (const file of [f.file, f.srt, f.vtt]) if (file && !stillUsed.has(file)) fs.rmSync(projectPath(p.id, "output", file), { force: true });
+  syncRenders(p);
+  saveProject(p);
+  res.json(publicProject(p));
+}));
+/** Puts a film version's script back into the editor (the current script is kept as an undo point). */
+app.post("/api/projects/:id/films/:fid/restore-script", wrap(async (req, res) => {
+  const p = P(req);
+  const f = filmOf(p, req.params.fid);
+  if (!f.scriptSnapshot) throw Object.assign(new Error("This version was rendered before scripts were saved with films, so its script can't be restored."), { status: 400 });
+  snapshotProject(p, `Before restoring the ${versionLabel(f.version)} v${f.n} script`);
+  p.scripts[f.version] = { ...JSON.parse(JSON.stringify(f.scriptSnapshot)), restoredFrom: f.n, updatedAt: new Date().toISOString() };
+  saveProject(p);
+  res.json(publicProject(p));
+}));
+
+// ---------- Word round trip ----------
+app.get("/api/projects/:id/word", wrap(async (req, res) => {
+  const p = P(req);
+  const slug = (p.person.name || "biopic").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "biopic";
+  res.attachment(`biopicker-${slug}-${new Date().toLocaleDateString("en-CA")}.docx`);
+  res.type("application/vnd.openxmlformats-officedocument.wordprocessingml.document").send(await buildDocx(p));
+}));
+app.post("/api/projects/:id/word", importUpload.single("doc"), wrap(async (req, res) => {
+  const p = P(req);
+  if (!req.file) throw Object.assign(new Error("Choose the edited Word document (.docx)."), { status: 400 });
+  const tables = parseDocx(req.file.buffer);
+  const undo = snapshotProject(p, `Before uploading ${req.file.originalname}`);
+  const result = await applyDocx(p, tables, { ingest: (file) => ingestPhoto(p.id, file) });
+  if (!result.changes.length) {
+    fs.rmSync(projectPath(p.id, "history", undo.file), { force: true });
+    return res.json({ project: publicProject(p), changes: [], warnings: result.warnings, undo: null });
+  }
+  saveProject(p);
+  if (result.timelineChanged) geocodeTimeline(p);
+  analyzePhotos(p, result.newPhotos);
+  res.json({ project: publicProject(p), changes: result.changes, warnings: result.warnings, undo });
+}));
+
+// ---------- undo points ----------
+app.get("/api/projects/:id/history", wrap(async (req, res) => res.json(listSnapshots(P(req).id))));
+app.post("/api/projects/:id/history/:file/restore", wrap(async (req, res) => {
+  const p = P(req);
+  if (!listSnapshots(p.id).some((s) => s.file === req.params.file)) throw Object.assign(new Error("That undo point no longer exists."), { status: 404 });
+  snapshotProject(p, "Before undo");
+  restoreSnapshot(p, req.params.file);
+  res.json(publicProject(p));
 }));
 
 app.get("/api/jobs/:jid", (req, res) => {
