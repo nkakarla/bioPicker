@@ -200,3 +200,4 @@ details.fold > summary { cursor: pointer; color: var(--muted); font-size: 14px; 
 .banner { display: flex; align-items: center; gap: 12px; justify-content: space-between; border: 1px solid var(--gold); background: rgba(214, 171, 94, .08); border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-size: 14px; }
 @media (max-width: 640px) { .projitem { flex-direction: column; align-items: stretch; } .rowacts { flex-direction: row; justify-content: flex-end; } }
 .hero details.fold p.small { font-size: 13px; margin: 0 0 10px; text-align: left; }
+.hero .recent > p.small { font-size: 13px; text-align: left; }

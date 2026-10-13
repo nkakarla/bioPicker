@@ -18,6 +18,9 @@ function h(tag, attrs = {}, ...kids) {
   return el;
 }
 
+// replaceChildren() would print null/false slots as text; skip them like h() does
+const put = (el, ...kids) => el.replaceChildren(...kids.flat().filter((c) => c != null && c !== false));
+
 function toast(msg, err = false) {
   const t = $("#toast");
   t.textContent = msg;
@@ -395,7 +398,7 @@ function updateJobUI(j) {
   jobUI.set(j.id, j);
   const box = $("#jobs");
   if (!box) return;
-  box.replaceChildren(
+  put(box, 
     ...[...jobUI.values()]
       .filter((x) => x.status === "running" || x.status === "queued")
       .map((x) =>
@@ -416,7 +419,7 @@ function updateJobUI(j) {
 // ---------- chrome ----------
 function renderProjBar() {
   const bar = $("#projBar");
-  bar.replaceChildren();
+  put(bar);
   if (!P) return;
   bar.append(
     h("span", { class: "muted small" }, "Biopic of"),
@@ -431,7 +434,7 @@ function renderProjBar() {
 
 function renderSteps() {
   const nav = $("#steps");
-  nav.replaceChildren();
+  put(nav);
   if (!P) return;
   const done = {
     person: !!P.person.name,
@@ -458,7 +461,7 @@ function render() {
   const views = { person: vPerson, media: vMedia, timeline: vTimeline, interview: vInterview, history: vHistory, style: vStyle, script: vScript, render: vRender };
   const scrollY = window.scrollY;
   const active = document.activeElement?.id;
-  main.replaceChildren(
+  put(main, 
     P.archivedAt ? h("div", { class: "banner" }, "🗄 This biopic is archived, so it's hidden from your main list. You can still view and edit it.", h("button", { class: "btn sm", onclick: () => setArchived(P.id, false, render) }, "Unarchive")) : null,
     h("div", { id: "jobs", class: "jobs" }),
     (views[step] || vPerson)());
@@ -479,7 +482,7 @@ function aiWarn() {
 function renderHome() {
   renderProjBar();
   renderSteps();
-  main.replaceChildren(
+  put(main, 
     h("div", { class: "hero" },
       h("h1", {}, "Every life is a film."),
       h("p", {}, "Upload photos, documents, dates and places. BioPicker interviews you, researches the history around each moment, casts a narrator, and cuts a Ken Burns–style biopic with public-domain newsreels, art and music."),
@@ -518,11 +521,11 @@ function drawProjects(list, trash = []) {
       : null);
   const active = list.filter((x) => !x.archivedAt);
   const archived = list.filter((x) => x.archivedAt);
-  box.replaceChildren(
+  put(box, 
     ...(active.length
       ? [h("h3", {}, "Your saved biopics — pick up where you left off"), ...active.map(row)]
       : [h("p", { class: "muted small" }, archived.length ? "No active biopics. Your archived ones are below." : "No saved biopics yet.")]),
-    archived.length ? h("details", { class: "fold" }, h("summary", {}, `Archived (${archived.length})`), ...archived.map(row)) : null,
+    archived.length ? h("details", { class: "fold", open: !active.length }, h("summary", {}, `Archived (${archived.length})`), ...archived.map(row)) : null,
     trash.length
       ? h("details", { class: "fold" }, h("summary", {}, `Recently deleted (${trash.length})`),
           h("p", { class: "muted small" }, `Deleted biopics are kept for ${30} days, then removed for good.`),
@@ -603,7 +606,7 @@ async function newProject() {
 }
 
 function showLogin() {
-  main.replaceChildren(
+  put(main, 
     h("div", { class: "hero" }, h("h1", {}, "BioPicker"), h("p", {}, "This studio is private. Enter the passcode."),
       h("div", { class: "row", style: "justify-content:center" },
         h("input", { id: "pc", type: "password", placeholder: "Passcode", style: "max-width:260px" }),
@@ -887,7 +890,7 @@ function vStyle() {
   const voiceBox = h("div", {});
   const drawVoices = () => {
     if (!voices) {
-      voiceBox.replaceChildren(h("span", { class: "muted" }, "Loading voices…"));
+      put(voiceBox, h("span", { class: "muted" }, "Loading voices…"));
       return;
     }
     const lang = (P.person.language || "en").slice(0, 2);
@@ -901,7 +904,7 @@ function vStyle() {
     const pitch = h("input", { type: "range", min: -20, max: 20, value: cur.pitch || 0, oninput: (e) => { pl.textContent = `${e.target.value}%`; }, onchange: (e) => set({ voice: { ...P.settings.voice, pitch: +e.target.value } }, true) });
     const rl = h("span", { class: "muted small" }, `${cur.rate || 0}%`);
     const pl = h("span", { class: "muted small" }, `${cur.pitch || 0}%`);
-    voiceBox.replaceChildren(
+    put(voiceBox, 
       h("div", { class: "grid2" },
         h("label", { class: "f full" }, "Narrator voice", sel),
         h("label", { class: "f" }, h("span", {}, "Pace ", rl), rate),
@@ -927,7 +930,7 @@ function vStyle() {
 
   const musicUp = h("div", {});
   const drawMusic = () =>
-    musicUp.replaceChildren(
+    put(musicUp, 
       s.music === "upload"
         ? h("div", {},
             dropZone("🎵 Drop your own music (mp3, wav, ogg, m4a) — make sure you have the rights", "audio/*", true, (f) => uploadFiles(`api/projects/${P.id}/music`, "music", f).catch((e) => toast(e.message, true)), "musicInput"),

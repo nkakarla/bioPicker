@@ -46,7 +46,11 @@ app.use((req, res, next) => {
   res.status(401).json({ error: "login required", login: true });
 });
 
-app.use(express.static(path.join(ROOT, "public"), { maxAge: "1h" }));
+// app code revalidates on every load (cheap 304s) so a deploy shows up without a hard refresh
+app.use(express.static(path.join(ROOT, "public"), {
+  maxAge: "1h",
+  setHeaders: (res, file) => { if (/\.(html|js|css)$/.test(file)) res.setHeader("Cache-Control", "no-cache"); },
+}));
 
 const wrap = (fn) => (req, res) =>
   Promise.resolve(fn(req, res)).catch((e) => {
