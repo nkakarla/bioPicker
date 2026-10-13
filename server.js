@@ -12,8 +12,8 @@ import { fetchImage, fetchVideoClip } from "./lib/media.js";
 import { deletePhotoFiles, ingestPhoto } from "./lib/photos.js";
 import { renderFilm, resolveMedia } from "./lib/produce.js";
 import {
-  VERSION_RE, createProject, emptyProject, exportProject, importProject, listProjects, listSnapshots, loadProject, projectPath,
-  restoreSnapshot, saveProject, snapshotProject, syncRenders,
+  VERSION_RE, createProject, deleteProject, emptyProject, exportProject, importProject, listProjects, listSnapshots, listTrash,
+  loadProject, projectPath, purgeExpiredTrash, purgeFromTrash, restoreFromTrash, restoreSnapshot, saveProject, snapshotProject, syncRenders,
 } from "./lib/store.js";
 import { applyDocx, buildDocx, parseDocx, versionLabel } from "./lib/word.js";
 import { readZip, writeZip } from "./lib/zip.js";
@@ -74,6 +74,31 @@ app.get("/api/health", (req, res) => res.json({ ok: true, ai: ai.aiConfigured(),
 // ---------- projects ----------
 app.get("/api/projects", wrap(async (req, res) => res.json(listProjects())));
 app.post("/api/projects", wrap(async (req, res) => res.json(createProject(String(req.body?.name || "").slice(0, 120)))));
+
+// archive (hide from the main list) and delete (to Recently deleted for 30 days, then gone)
+app.post("/api/projects/:id/archive", wrap(async (req, res) => {
+  const p = P(req);
+  p.archivedAt = req.body?.archived === false ? null : new Date().toISOString();
+  saveProject(p);
+  res.json(publicProject(p));
+}));
+app.delete("/api/projects/:id", wrap(async (req, res) => {
+  const p = P(req);
+  const busy = activeJobs(p.id);
+  if (busy.length) throw Object.assign(new Error(`Wait for “${busy[0].label}” to finish before deleting this biopic.`), { status: 409 });
+  res.json(deleteProject(p.id));
+}));
+app.get("/api/trash", wrap(async (req, res) => res.json(listTrash())));
+app.post("/api/trash/:id/restore", wrap(async (req, res) => {
+  const p = restoreFromTrash(req.params.id);
+  res.json({ id: p.id, name: p.person.name });
+}));
+app.delete("/api/trash/:id", wrap(async (req, res) => {
+  purgeFromTrash(req.params.id);
+  res.json({ ok: true });
+}));
+purgeExpiredTrash();
+setInterval(() => { try { purgeExpiredTrash(); } catch (e) { console.error("trash purge", e); } }, 6 * 3600 * 1000).unref();
 
 // backup (download everything as one .zip) and restore (upload that .zip here or on another BioPicker)
 const importUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 * 1024, files: 1 } });

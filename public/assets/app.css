@@ -185,3 +185,18 @@ dialog.bp .row.end { margin-top: 14px; }
 .tabs { flex-wrap: wrap; }
 .tabs .sep { width: 1px; background: var(--line); margin: 0 4px; }
 .group-h { display: flex; align-items: center; gap: 10px; margin: 26px 0 10px; }
+
+/* archive / delete */
+.projitem { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.projitem .projrow { flex: 1; min-width: 0; margin-bottom: 0 !important; }
+.projitem div.projrow { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 1px dashed var(--line); border-radius: 10px; background: var(--panel); }
+.projitem.archived .projrow { opacity: .8; }
+.rowacts { display: flex; flex-direction: column; gap: 4px; }
+.btn.ghost.danger { color: var(--red); }
+.btn.danger-fill { background: var(--red); border-color: var(--red); color: #fff; }
+.btn.danger-fill:hover { background: #e07560; }
+details.fold { margin-top: 18px; }
+details.fold > summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-bottom: 10px; }
+.banner { display: flex; align-items: center; gap: 12px; justify-content: space-between; border: 1px solid var(--gold); background: rgba(214, 171, 94, .08); border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-size: 14px; }
+@media (max-width: 640px) { .projitem { flex-direction: column; align-items: stretch; } .rowacts { flex-direction: row; justify-content: flex-end; } }
+.hero details.fold p.small { font-size: 13px; margin: 0 0 10px; text-align: left; }

@@ -261,7 +261,12 @@ function fileMenu() {
       item("Undo a change…", "Go back to before a Word upload or script restore", showHistory),
       h("hr"),
       item("Copy link", "Continue this biopic in another browser or device", copyLink),
-      item("Download backup (.zip)", "Everything, including films, to restore on any BioPicker", downloadBackup)),
+      item("Download backup (.zip)", "Everything, including films, to restore on any BioPicker", downloadBackup),
+      h("hr"),
+      P.archivedAt
+        ? item("Unarchive", "Put this biopic back in your main list", () => setArchived(P.id, false, render))
+        : item("Archive", "Hide from the main list; nothing is changed or deleted", () => setArchived(P.id, true, render)),
+      item("Delete biopic…", "Move to Recently deleted (restorable for 30 days)", () => deleteBiopic({ id: P.id, name: P.person.name, archivedAt: P.archivedAt, counts: { films: P.films.length } }))),
     wordInput,
   );
   document.addEventListener("click", (e) => { if (!menu.contains(e.target)) menu.open = false; });
@@ -453,7 +458,10 @@ function render() {
   const views = { person: vPerson, media: vMedia, timeline: vTimeline, interview: vInterview, history: vHistory, style: vStyle, script: vScript, render: vRender };
   const scrollY = window.scrollY;
   const active = document.activeElement?.id;
-  main.replaceChildren(h("div", { id: "jobs", class: "jobs" }), (views[step] || vPerson)());
+  main.replaceChildren(
+    P.archivedAt ? h("div", { class: "banner" }, "🗄 This biopic is archived, so it's hidden from your main list. You can still view and edit it.", h("button", { class: "btn sm", onclick: () => setArchived(P.id, false, render) }, "Unarchive")) : null,
+    h("div", { id: "jobs", class: "jobs" }),
+    (views[step] || vPerson)());
   for (const j of P.jobs || []) updateJobUI(j);
   window.scrollTo(0, scrollY);
   if (active && document.getElementById(active)) document.getElementById(active).focus();
@@ -484,13 +492,13 @@ function renderHome() {
           h("input", { type: "file", accept: ".zip,application/zip", hidden: true, onchange: (e) => restoreBackup(e.target.files[0]) }))),
     ),
   );
-  api("GET", "api/projects")
-    .then(drawProjects)
-    .catch(() => drawProjects(recent().map((x) => ({ id: x.id, name: x.name, updatedAt: new Date(x.at).toISOString() }))));
+  Promise.all([api("GET", "api/projects"), api("GET", "api/trash").catch(() => [])])
+    .then(([list, trash]) => drawProjects(list, trash))
+    .catch(() => drawProjects(recent().map((x) => ({ id: x.id, name: x.name, updatedAt: new Date(x.at).toISOString() })), []));
   $("#newName").addEventListener("keydown", (e) => e.key === "Enter" && newProject());
 }
 
-function drawProjects(list) {
+function drawProjects(list, trash = []) {
   const box = document.getElementById("projList");
   if (!box) return;
   const ago = (t) => {
@@ -498,15 +506,88 @@ function drawProjects(list) {
     return isNaN(d) ? "" : d.toLocaleString([], { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
   };
   const bits = (c) => c ? [c.photos && `${c.photos} photo${c.photos > 1 ? "s" : ""}`, c.events && `${c.events} event${c.events > 1 ? "s" : ""}`, c.answers && `${c.answers} answer${c.answers > 1 ? "s" : ""}`, c.scripts && "script ready", c.films && "film rendered"].filter(Boolean).join(" · ") : "";
+  const row = (x) => h("div", { class: "projitem" + (x.archivedAt ? " archived" : "") },
+    h("a", { href: `#p=${x.id}`, class: "projrow" },
+      x.cover ? h("img", { src: `files/${x.id}/thumbs/${encodeURIComponent(x.cover)}`, alt: "", loading: "lazy" }) : h("span", { class: "ph" }, "🎬"),
+      h("span", { class: "meta" }, h("b", {}, x.name), h("span", { class: "muted small" }, [x.archivedAt ? `Archived ${ago(x.archivedAt)}` : `Last saved ${ago(x.updatedAt)}`, bits(x.counts)].filter(Boolean).join(" · "))),
+      h("span", { class: "go" }, x.archivedAt ? "Open →" : "Continue →")),
+    x.counts
+      ? h("div", { class: "rowacts" },
+          h("button", { class: "btn sm ghost", title: x.archivedAt ? "Move back to your biopics" : "Hide from this list; nothing is changed or deleted", onclick: () => setArchived(x.id, !x.archivedAt, renderHome) }, x.archivedAt ? "Unarchive" : "Archive"),
+          h("button", { class: "btn sm ghost danger", title: "Delete this biopic", onclick: () => deleteBiopic(x, renderHome) }, "Delete"))
+      : null);
+  const active = list.filter((x) => !x.archivedAt);
+  const archived = list.filter((x) => x.archivedAt);
   box.replaceChildren(
-    ...(list.length
-      ? [h("h3", {}, "Your saved biopics — pick up where you left off"),
-         ...list.map((x) => h("a", { href: `#p=${x.id}`, class: "projrow" },
-           x.cover ? h("img", { src: `files/${x.id}/thumbs/${encodeURIComponent(x.cover)}`, alt: "", loading: "lazy" }) : h("span", { class: "ph" }, "🎬"),
-           h("span", { class: "meta" }, h("b", {}, x.name), h("span", { class: "muted small" }, [`Last saved ${ago(x.updatedAt)}`, bits(x.counts)].filter(Boolean).join(" · "))),
-           h("span", { class: "go" }, "Continue →")))]
-      : [h("p", { class: "muted small" }, "No saved biopics yet.")]),
+    ...(active.length
+      ? [h("h3", {}, "Your saved biopics — pick up where you left off"), ...active.map(row)]
+      : [h("p", { class: "muted small" }, archived.length ? "No active biopics. Your archived ones are below." : "No saved biopics yet.")]),
+    archived.length ? h("details", { class: "fold" }, h("summary", {}, `Archived (${archived.length})`), ...archived.map(row)) : null,
+    trash.length
+      ? h("details", { class: "fold" }, h("summary", {}, `Recently deleted (${trash.length})`),
+          h("p", { class: "muted small" }, `Deleted biopics are kept for ${30} days, then removed for good.`),
+          ...trash.map((t) => h("div", { class: "projitem deleted" },
+            h("div", { class: "projrow" }, h("span", { class: "ph" }, "🗑"),
+              h("span", { class: "meta" }, h("b", {}, t.name), h("span", { class: "muted small" }, `Deleted ${ago(t.deletedAt)} · removed for good on ${new Date(t.purgeAt).toLocaleDateString([], { month: "short", day: "numeric" })}`))),
+            h("div", { class: "rowacts" },
+              h("button", { class: "btn sm", onclick: () => restoreDeleted(t) }, "Restore"),
+              h("button", { class: "btn sm ghost danger", onclick: () => purgeDeleted(t) }, "Delete forever")))))
+      : null,
   );
+}
+
+async function setArchived(id, archived, then) {
+  try {
+    const p = await api("POST", `api/projects/${id}/archive`, { archived });
+    if (P?.id === id) P = p;
+    toast(archived ? `“${p.person.name || "Untitled"}” archived. Find it under Archived on the home page.` : `“${p.person.name || "Untitled"}” is back in your biopics.`);
+    then?.();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function deleteBiopic(x, then) {
+  const name = x.name || x.person?.name || "Untitled";
+  const films = x.counts?.films ?? x.films?.length ?? 0;
+  const d = showDialog(`Delete “${name}”?`,
+    h("p", {}, "This removes the biopic from your list, with its photos, documents, interview, scripts", films ? ` and ${films} rendered film${films > 1 ? "s" : ""}` : "", "."),
+    h("p", { class: "muted small" }, "It goes to Recently deleted on the home page, where you can restore it for 30 days. If you only want it out of the way, Archive it instead."),
+    h("div", { class: "row end" },
+      h("button", { class: "btn", onclick: () => d.close() }, "Cancel"),
+      x.archivedAt ? null : h("button", { class: "btn", onclick: () => { d.close(); setArchived(x.id, true, then); } }, "Archive instead"),
+      h("button", { class: "btn primary danger-fill", onclick: async (e) => {
+        e.currentTarget.disabled = true;
+        try {
+          if (P?.id === x.id) { await flush(); }
+          await api("DELETE", `api/projects/${x.id}`);
+          try { localStorage.setItem("bp_recent", JSON.stringify(recent().filter((r) => r.id !== x.id))); } catch {}
+          d.close();
+          toast(`“${name}” moved to Recently deleted.`);
+          if (P?.id === x.id) { P = null; location.hash = ""; } else then?.();
+        } catch (er) { toast(er.message, true); e.currentTarget.disabled = false; }
+      } }, "Delete")));
+}
+
+async function restoreDeleted(t) {
+  try {
+    await api("POST", `api/trash/${t.id}/restore`);
+    toast(`“${t.name}” restored.`);
+    renderHome();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function purgeDeleted(t) {
+  if (!confirm(`Delete “${t.name}” forever? Its photos, scripts and films are erased and can't be recovered.`)) return;
+  try {
+    await api("DELETE", `api/trash/${t.id}`);
+    toast(`“${t.name}” deleted forever.`);
+    renderHome();
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 async function newProject() {
