@@ -223,6 +223,14 @@ code.secret { user-select: all; color: var(--gold2); word-break: break-all; }
 .acctacts { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 16px; }
 dialog.bp .authform { margin: 6px 0 0; }
 .steps:empty { display: none; }
+/* with the step menu hidden (signed out, home page) give the page the full width */
+.shell:has(> .steps:empty) { grid-template-columns: 1fr; }
 .acct .menu > summary { white-space: nowrap; }
 .acct .menu .pop { left: auto; right: 0; }
 @media (max-width: 700px) { .top { flex-wrap: wrap; } .proj { order: 3; width: 100%; margin-left: 0; } .acct { margin-left: auto; } }
+
+/* show/hide password */
+.pw-wrap { position: relative; display: block; }
+.pw-wrap input { padding-right: 42px; }
+.pw-eye { all: unset; cursor: pointer; position: absolute; right: 8px; top: 50%; transform: translateY(-50%); font-size: 16px; line-height: 1; padding: 4px; border-radius: 6px; opacity: .8; }
+.pw-eye:hover, .pw-eye:focus-visible { opacity: 1; outline: 2px solid var(--gold); outline-offset: 1px; }

@@ -638,7 +638,20 @@ const authForm = (onSubmit, ...kids) => {
   });
   return f;
 };
-const authInput = (label, name, attrs = {}) => h("label", { class: "f" }, label, h("input", { name, ...attrs }));
+function authInput(label, name, attrs = {}) {
+  const input = h("input", { name, ...attrs });
+  if (attrs.type !== "password") return h("label", { class: "f" }, label, input);
+  // every password field gets an eye that shows/hides what was typed
+  const eye = h("button", { type: "button", class: "pw-eye", "aria-label": "Show password", title: "Show password", onclick: () => {
+    const show = input.type === "password";
+    input.type = show ? "text" : "password";
+    eye.textContent = show ? "🙈" : "👁";
+    eye.setAttribute("aria-label", show ? "Hide password" : "Show password");
+    eye.title = eye.getAttribute("aria-label");
+    input.focus();
+  } }, "👁");
+  return h("label", { class: "f" }, label, h("span", { class: "pw-wrap" }, input, eye));
+}
 const codeInput = (label = "6-digit code") => authInput(label, "code", { inputmode: "numeric", autocomplete: "one-time-code", placeholder: "123456", maxlength: 12, required: true });
 const authLinks = (...links) => h("p", { class: "small muted authlinks" }, ...links.flatMap((l, i) => (i ? [" · ", l] : [l])));
 const linkTo = (label, mode) => h("a", { href: "#", onclick: (e) => { e.preventDefault(); showAuth(mode); } }, label);
