@@ -3,6 +3,7 @@
 // Stop the server before claim, reset-2fa or unpublish, then start it again: the running
 // server keeps users and biopics in memory and would overwrite the change.
 //   node scripts/admin.js users                    list accounts
+//   node scripts/admin.js add-user <username> <pw> create an account; it sets up its authenticator at first sign-in
 //   node scripts/admin.js claim <username>         give every biopic from before accounts to <username>
 //   node scripts/admin.js reset-2fa <username>     user sets up a new authenticator at next sign-in
 //   node scripts/admin.js reports                  list reports about public biopics
@@ -10,11 +11,11 @@
 // Copyright (c) 2026 ePerf
 import fs from "node:fs";
 import path from "node:path";
-import { allUsers, findUser, resetTwoFactor } from "../lib/auth.js";
+import { adminCreateUser, allUsers, findUser, resetTwoFactor } from "../lib/auth.js";
 import { allProjects, claimUnowned, loadProject, saveProject } from "../lib/store.js";
 import { DATA_DIR } from "../lib/util.js";
 
-const [cmd, arg] = process.argv.slice(2);
+const [cmd, arg, arg2] = process.argv.slice(2);
 const need = (x, what) => {
   if (!x) {
     console.error(`Missing ${what}.`);
@@ -30,6 +31,16 @@ switch (cmd) {
     for (const p of allProjects()) counts[p.ownerId] = (counts[p.ownerId] || 0) + 1;
     for (const u of allUsers()) console.log(`${u.username.padEnd(24)} ${String(counts[u.id] || 0).padStart(4)} biopic(s)  since ${u.createdAt.slice(0, 10)}  2FA ${u.totpSecret ? "on" : "RESET"}  devices ${u.devices?.length || 0}`);
     console.log(`${counts.undefined || counts.null || 0} biopic(s) without an owner.`);
+    break;
+  }
+  case "add-user": {
+    try {
+      const u = adminCreateUser(need(arg, "username"), need(arg2, "password"));
+      console.log(`Created ${u.username}. Sign in with that password, then set up the authenticator app.`);
+    } catch (e) {
+      console.error(e.message);
+      process.exit(1);
+    }
     break;
   }
   case "claim": {

@@ -30,9 +30,10 @@ Biopics made before accounts have no owner. They stay hidden until they're given
    ```
 
 ## Admin
-Run on the server (stop the server first for `claim`, `reset-2fa` and `unpublish`):
+Run on the server (stop the server first for `add-user`, `claim`, `reset-2fa` and `unpublish`):
 ```
 node scripts/admin.js users                  # accounts and biopic counts
+node scripts/admin.js add-user <name> <pw>   # account that sets up its authenticator at first sign-in
 node scripts/admin.js claim <username>       # give unowned (pre-1.1) biopics to an account
 node scripts/admin.js reset-2fa <username>   # lost phone + recovery codes: new authenticator at next sign-in
 node scripts/admin.js reports                # reports about public biopics
