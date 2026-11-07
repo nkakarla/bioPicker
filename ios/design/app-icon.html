@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@144,600;144,700&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; width: 1024px; height: 1024px; overflow: hidden; }
+  .icon {
+    width: 1024px; height: 1024px; position: relative;
+    background:
+      radial-gradient(circle at 50% 38%, #2a2216 0%, #19150f 45%, #0f0d0a 100%);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-family: "Fraunces", Georgia, serif;
+    font-variation-settings: "opsz" 144;
+  }
+  /* thin gold frame, well inside the iOS corner mask */
+  .frame { position: absolute; inset: 92px; border: 6px solid rgba(214, 171, 94, .55); border-radius: 64px; }
+  .word { font-weight: 700; font-size: 352px; line-height: .86; letter-spacing: -8px; }
+  .bio { color: #efe6d4; }
+  .pic { padding: 0 40px; color: #d6ab5e; background: linear-gradient(180deg, #f0cf8c 0%, #d6ab5e 55%, #b8893f 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  .rule { width: 300px; height: 8px; border-radius: 4px; background: #d6ab5e; margin: 26px 0 30px; opacity: .9; }
+</style>
+</head>
+<body>
+  <div class="icon">
+    <div class="frame"></div>
+    <div class="word bio">Bio</div>
+    <div class="rule"></div>
+    <div class="word pic">Pic</div>
+  </div>
+</body>
+</html>
