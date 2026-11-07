@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BioPicker</title>
+  <meta name="robots" content="noindex" />
+  <link rel="icon" type="image/png" href="../favicon.png" />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../assets/app.css" />
+  <style>
+    .watch { max-width: 960px; margin: 0 auto; padding: 26px 20px 60px; }
+    .watch header { margin-bottom: 18px; }
+    .watch .film { margin-bottom: 28px; }
+    .watch video { width: 100%; border-radius: 12px; background: #000; }
+    .watch .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+    .watch .gallery figure { margin: 0; }
+    .watch .gallery img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; display: block; }
+    .watch .gallery figcaption { font-size: 12px; color: var(--muted); margin-top: 3px; }
+    .watch .report { margin-top: 40px; }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="../" title="Make your own biopic">
+      <img src="../favicon.png" alt="" width="28" height="28" />
+      <span>Bio<b>Picker</b></span>
+    </a>
+  </header>
+  <main class="watch" id="w"><p class="muted">Loading…</p></main>
+  <footer class="foot">© 2026 ePerf · BioPicker · Archival media from public-domain collections.</footer>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module">
+    const id = location.pathname.split("/").filter(Boolean).pop();
+    const w = document.getElementById("w");
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+    const file = (dir, f) => `../files/${encodeURIComponent(id)}/${dir}/${encodeURIComponent(f)}`;
+    const dur = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
+    const years = (p) => [p.born, p.died].map((d) => (String(d).match(/\d{4}/) || [""])[0]).filter(Boolean).join(" – ");
+    function toast(msg) {
+      const t = document.getElementById("toast");
+      t.textContent = msg;
+      t.className = "show";
+      setTimeout(() => (t.className = ""), 3500);
+    }
+    try {
+      const r = await fetch(`../api/public/${encodeURIComponent(id)}`);
+      if (!r.ok) throw new Error();
+      const p = await r.json();
+      document.title = `${p.name} — a BioPicker film`;
+      w.innerHTML = `
+        <header>
+          <h1>${esc(p.name)}</h1>
+          <p class="lead">${esc([years(p), p.claimToFame].filter(Boolean).join(" · "))}</p>
+        </header>
+        ${p.films.map((f) => `
+          <section class="film">
+            <h2>${esc(f.title || f.label)} <span class="muted small" style="font-family:var(--sans)">${esc(f.label)} · ${dur(f.seconds)}</span></h2>
+            ${f.tagline ? `<p class="muted">${esc(f.tagline)}</p>` : ""}
+            <video controls playsinline preload="metadata" src="${file("output", f.file)}">
+              ${f.vtt ? `<track kind="captions" src="${file("output", f.vtt)}" label="Captions" default>` : ""}
+            </video>
+          </section>`).join("")}
+        ${p.photos.length ? `<h2>Photos</h2><div class="gallery">${p.photos.map((ph) => `
+          <figure><img loading="lazy" src="${file("thumbs", ph.file)}" alt="${esc(ph.caption)}"><figcaption>${esc([ph.date, ph.caption].filter(Boolean).join(" · "))}</figcaption></figure>`).join("")}</div>` : ""}
+        <p class="report small muted">Made with <a href="../">BioPicker</a>. Is something here inappropriate or shared without permission? <a href="#" id="report">Report it</a>.</p>`;
+      document.getElementById("report").onclick = async (e) => {
+        e.preventDefault();
+        const reason = prompt("What's wrong with this biopic? (We review every report.)");
+        if (!reason) return;
+        const rr = await fetch(`../api/public/${encodeURIComponent(id)}/report`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }) });
+        toast(rr.ok ? "Thank you. We'll review it." : "Couldn't send the report; try again later.");
+      };
+    } catch {
+      w.innerHTML = `<h1>This film isn't available</h1><p class="lead">It may have been made private or deleted.</p><p><a class="btn primary" href="../">Make a biopic of your own</a></p>`;
+    }
+  </script>
+</body>
+</html>

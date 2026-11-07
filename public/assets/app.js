@@ -38,8 +38,9 @@ async function api(method, url, body, isForm) {
   const ct = r.headers.get("content-type") || "";
   const data = ct.includes("json") ? await r.json() : await r.blob();
   if (r.status === 401 && data?.login) {
-    showLogin();
-    throw new Error("Please enter the passcode.");
+    ME = null;
+    showAuth("signin");
+    throw new Error("Please sign in.");
   }
   if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
   return data;
@@ -82,6 +83,7 @@ const TYPES = ["birth", "school", "graduation", "college", "job", "marriage", "c
 
 // ---------- routing ----------
 function route() {
+  if (!ME) return showAuth("signin");
   const m = location.hash.match(/p=([A-Za-z0-9]+)(?:&s=(\w+))?/);
   if (!m) {
     if (P && isDirty()) flush();
@@ -263,6 +265,7 @@ function fileMenu() {
       item("Update from Word…", "Upload the edited .docx; changes are applied and can be undone", () => wordInput.click()),
       item("Undo a change…", "Go back to before a Word upload or script restore", showHistory),
       h("hr"),
+      item(P.public ? "🌐 Public link…" : "Make public…", P.public ? "Anyone with the link can watch the films" : "Let anyone with a link watch the finished films", publicDialog),
       item("Copy link", "Continue this biopic in another browser or device", copyLink),
       item("Download backup (.zip)", "Everything, including films, to restore on any BioPicker", downloadBackup),
       h("hr"),
@@ -512,7 +515,7 @@ function drawProjects(list, trash = []) {
   const row = (x) => h("div", { class: "projitem" + (x.archivedAt ? " archived" : "") },
     h("a", { href: `#p=${x.id}`, class: "projrow" },
       x.cover ? h("img", { src: `files/${x.id}/thumbs/${encodeURIComponent(x.cover)}`, alt: "", loading: "lazy" }) : h("span", { class: "ph" }, "🎬"),
-      h("span", { class: "meta" }, h("b", {}, x.name), h("span", { class: "muted small" }, [x.archivedAt ? `Archived ${ago(x.archivedAt)}` : `Last saved ${ago(x.updatedAt)}`, bits(x.counts)].filter(Boolean).join(" · "))),
+      h("span", { class: "meta" }, h("b", {}, x.name, x.public ? h("span", { class: "tag ok", title: "Anyone with the link can watch" }, " 🌐 Public") : null), h("span", { class: "muted small" }, [x.archivedAt ? `Archived ${ago(x.archivedAt)}` : `Last saved ${ago(x.updatedAt)}`, bits(x.counts)].filter(Boolean).join(" · "))),
       h("span", { class: "go" }, x.archivedAt ? "Open →" : "Continue →")),
     x.counts
       ? h("div", { class: "rowacts" },
@@ -605,13 +608,287 @@ async function newProject() {
   }
 }
 
-function showLogin() {
-  fill(main, 
-    h("div", { class: "hero" }, h("h1", {}, "BioPicker"), h("p", {}, "This studio is private. Enter the passcode."),
-      h("div", { class: "row", style: "justify-content:center" },
-        h("input", { id: "pc", type: "password", placeholder: "Passcode", style: "max-width:260px" }),
-        h("button", { class: "btn primary", onclick: async () => { await api("POST", "api/login", { passcode: $("#pc").value }).then(() => route()).catch((e) => toast(e.message, true)); } }, "Enter"))),
-  );
+// ---------- accounts: sign in, sign up with an authenticator app (2FA), recovery ----------
+let ME = null; // signed-in user: { username, createdAt, recoveryCodesLeft }
+
+function showAuth(mode = "signin", data = {}) {
+  P = null;
+  renderProjBar();
+  renderSteps();
+  renderAcct();
+  const views = { signin: authSignIn, code: authCode, signup: authSignUp, enroll: authEnroll, codes: authRecoveryCodes, recover: authRecover };
+  fill(main, h("div", { class: "hero auth" }, (views[mode] || authSignIn)(data)));
+  main.querySelector("input")?.focus();
+}
+
+const authForm = (onSubmit, ...kids) => {
+  const f = h("form", { class: "authform", novalidate: true }, ...kids);
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = f.querySelector("button[type=submit]");
+    btn.disabled = true;
+    try {
+      await onSubmit(new FormData(f));
+    } catch (er) {
+      toast(er.message, true);
+      if (er.restart) showAuth(ME ? "signin" : "signup");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  return f;
+};
+const authInput = (label, name, attrs = {}) => h("label", { class: "f" }, label, h("input", { name, ...attrs }));
+const codeInput = (label = "6-digit code") => authInput(label, "code", { inputmode: "numeric", autocomplete: "one-time-code", placeholder: "123456", maxlength: 12, required: true });
+const authLinks = (...links) => h("p", { class: "small muted authlinks" }, ...links.flatMap((l, i) => (i ? [" · ", l] : [l])));
+const linkTo = (label, mode) => h("a", { href: "#", onclick: (e) => { e.preventDefault(); showAuth(mode); } }, label);
+
+function authSignIn() {
+  return [
+    h("h1", {}, "Every life is a film."),
+    h("p", {}, "Sign in to your BioPicker studio."),
+    authForm(async (fd) => {
+      const r = await api("POST", "api/auth/login", { username: fd.get("username"), password: fd.get("password") });
+      if (r.enroll) showAuth("enroll", { ...r, reset: true });
+      else showAuth("code", r);
+    },
+      authInput("Username", "username", { autocomplete: "username", autocapitalize: "none", spellcheck: "false", required: true }),
+      authInput("Password", "password", { type: "password", autocomplete: "current-password", required: true }),
+      h("button", { class: "btn primary", type: "submit" }, "Sign in")),
+    authLinks(linkTo("Create an account", "signup"), linkTo("Forgot password?", "recover")),
+  ];
+}
+
+function authCode({ challenge }) {
+  return [
+    h("h1", {}, "Enter your code"),
+    h("p", {}, "Open your authenticator app and enter the 6-digit code for BioPicker. Lost your phone? Enter one of your recovery codes instead."),
+    authForm(async (fd) => {
+      const r = await api("POST", "api/auth/verify", { challenge, code: fd.get("code") });
+      if (r.usedRecoveryCode) toast(`Recovery code used. You have ${r.user.recoveryCodesLeft} left; make new ones in Account settings.`);
+      signedIn(r.user);
+    }, codeInput("Code"), h("button", { class: "btn primary", type: "submit" }, "Verify")),
+    authLinks(linkTo("Start over", "signin")),
+  ];
+}
+
+function authSignUp() {
+  return [
+    h("h1", {}, "Create your account"),
+    h("p", {}, "Your biopics, photos and films are private to your account unless you choose to share a film. Accounts are protected with a password and a code from an authenticator app (two-factor authentication)."),
+    authForm(async (fd) => {
+      if (fd.get("password") !== fd.get("password2")) throw new Error("The passwords don't match.");
+      const r = await api("POST", "api/auth/signup", { username: fd.get("username"), password: fd.get("password"), agree: fd.get("agree") === "on" });
+      showAuth("enroll", r);
+    },
+      authInput("Username", "username", { autocomplete: "username", autocapitalize: "none", spellcheck: "false", placeholder: "3–32 letters or numbers", required: true }),
+      authInput("Password", "password", { type: "password", autocomplete: "new-password", placeholder: "At least 10 characters", required: true }),
+      authInput("Confirm password", "password2", { type: "password", autocomplete: "new-password", required: true }),
+      h("label", { class: "agree small" }, h("input", { type: "checkbox", name: "agree" }),
+        h("span", {}, "I agree to the ", h("a", { href: "terms.html", target: "_blank" }, "Terms"), " and ", h("a", { href: "privacy.html", target: "_blank" }, "Privacy Policy"),
+          ", including that the photos, documents and details I add are processed by AI services (Anthropic's Claude) to write my biopic.")),
+      h("button", { class: "btn primary", type: "submit" }, "Continue")),
+    authLinks(h("span", {}, "Have an account? "), linkTo("Sign in", "signin")),
+  ];
+}
+
+function authEnroll({ enroll, qr, uri, secret, reset }) {
+  const onPhone = /iPhone|iPad|Android/i.test(navigator.userAgent);
+  return [
+    h("h1", {}, reset ? "Set up your authenticator again" : "Turn on two-factor sign-in"),
+    h("p", {}, "BioPicker asks for a 6-digit code from an authenticator app each time you sign in, so nobody can get in with your password alone."),
+    h("ol", { class: "enroll" },
+      h("li", {}, onPhone
+        ? [h("b", {}, "Add BioPicker to your authenticator. "), "On iPhone, tap the button to add it to the Passwords app, or use Google or Microsoft Authenticator.",
+            h("div", {}, h("a", { class: "btn", href: uri }, "＋ Add to authenticator app"))]
+        : [h("b", {}, "Scan this QR code "), "with an authenticator app (iPhone Passwords, Google Authenticator, Microsoft Authenticator, 1Password…)."]),
+      h("li", {}, h("div", { class: "qr", html: qr }), h("p", { class: "small muted" }, "Can't scan? Enter this key in the app: ", h("code", { class: "secret" }, secret))),
+      h("li", {}, h("b", {}, "Enter the 6-digit code "), "the app now shows for BioPicker.")),
+    authForm(async (fd) => {
+      const r = await api("POST", "api/auth/enroll", { enroll, code: fd.get("code") });
+      ME = r.user;
+      showAuth("codes", { codes: r.recoveryCodes, next: () => signedIn(r.user) });
+    }, codeInput(), h("button", { class: "btn primary", type: "submit" }, "Turn on and continue")),
+  ];
+}
+
+function recoveryCodesBlock(codes) {
+  const text = `BioPicker recovery codes for ${ME?.username || ""}\nEach code works once. Keep them somewhere safe.\n\n${codes.join("\n")}\n`;
+  return [
+    h("div", { class: "codes" }, ...codes.map((c) => h("code", {}, c))),
+    h("div", { class: "row", style: "justify-content:center" },
+      h("button", { class: "btn", type: "button", onclick: () => navigator.clipboard.writeText(text).then(() => toast("Copied."), () => toast("Couldn't copy; write them down instead.", true)) }, "Copy"),
+      h("button", { class: "btn", type: "button", onclick: () => {
+        const a = h("a", { href: URL.createObjectURL(new Blob([text], { type: "text/plain" })), download: "biopicker-recovery-codes.txt" });
+        document.body.append(a); a.click(); a.remove();
+      } }, "Save as file")),
+  ];
+}
+
+function authRecoveryCodes({ codes, next }) {
+  const go = h("button", { class: "btn primary", disabled: true, onclick: next }, "Continue");
+  return [
+    h("h1", {}, "Save your recovery codes"),
+    h("p", {}, "If you lose your phone or forget your password, a recovery code gets you back in. Each code works once. This is the only time they're shown."),
+    ...recoveryCodesBlock(codes),
+    h("label", { class: "agree small" }, h("input", { type: "checkbox", onchange: (e) => (go.disabled = !e.target.checked) }), h("span", {}, "I've saved these codes somewhere safe")),
+    h("div", { class: "row", style: "justify-content:center" }, go),
+  ];
+}
+
+function authRecover() {
+  return [
+    h("h1", {}, "Forgot your password?"),
+    h("p", {}, "Use one of the recovery codes you saved when you created your account to choose a new password."),
+    authForm(async (fd) => {
+      if (fd.get("newPassword") !== fd.get("newPassword2")) throw new Error("The passwords don't match.");
+      const r = await api("POST", "api/auth/recover", { username: fd.get("username"), recoveryCode: fd.get("recoveryCode"), newPassword: fd.get("newPassword") });
+      toast(`Password changed. ${r.user.recoveryCodesLeft} recovery code(s) left.`);
+      signedIn(r.user);
+    },
+      authInput("Username", "username", { autocomplete: "username", autocapitalize: "none", spellcheck: "false", required: true }),
+      authInput("Recovery code", "recoveryCode", { autocapitalize: "none", autocomplete: "off", placeholder: "abcd-efgh", required: true }),
+      authInput("New password", "newPassword", { type: "password", autocomplete: "new-password", placeholder: "At least 10 characters", required: true }),
+      authInput("Confirm new password", "newPassword2", { type: "password", autocomplete: "new-password", required: true }),
+      h("button", { class: "btn primary", type: "submit" }, "Change password and sign in")),
+    h("p", { class: "small muted" }, "No recovery codes left? Contact ePerf support to verify your identity."),
+    authLinks(linkTo("Back to sign in", "signin")),
+  ];
+}
+
+function signedIn(user) {
+  ME = user;
+  renderAcct();
+  native?.({ type: "signedIn" });
+  route();
+}
+
+async function signOut() {
+  try { await api("POST", "api/auth/logout", { deviceToken: window.bpNative.deviceToken || undefined }); } catch {}
+  ME = null;
+  P = null;
+  try { localStorage.removeItem("bp_recent"); } catch {}
+  history.replaceState(null, "", location.pathname);
+  showAuth("signin");
+}
+
+// ---------- account menu & settings ----------
+function renderAcct() {
+  const box = $("#acct");
+  if (!box) return;
+  if (!ME) return fill(box);
+  const menu = h("details", { class: "menu" });
+  menu.append(
+    h("summary", { class: "btn sm ghost", title: "Your account" }, `👤 ${ME.username} ▾`),
+    h("div", { class: "pop" },
+      h("button", { onclick: () => { menu.open = false; accountDialog(); } }, h("b", {}, "Account settings"), h("span", {}, "Password, authenticator, recovery codes, delete account")),
+      h("button", { onclick: () => { menu.open = false; signOut(); } }, h("b", {}, "Sign out"), h("span", {}, "Sign out on this device"))));
+  document.addEventListener("click", (e) => { if (!menu.contains(e.target)) menu.open = false; });
+  fill(box, menu);
+}
+
+async function accountDialog() {
+  try { ME = (await api("GET", "api/auth/me")).user || ME; } catch {}
+  const d = showDialog("Account",
+    h("p", {}, "Signed in as ", h("b", {}, ME.username), h("span", { class: "muted small" }, ` · member since ${new Date(ME.createdAt).toLocaleDateString([], { dateStyle: "medium" })}`)),
+    h("p", { class: "small muted" }, `${ME.recoveryCodesLeft} recovery code${ME.recoveryCodesLeft === 1 ? "" : "s"} left.`),
+    h("div", { class: "acctacts" },
+      h("button", { class: "btn", onclick: () => reauthDialog("Change password", "Choose a new password. You'll stay signed in here; other devices are signed out.", [["New password", "newPassword", "password", "new-password"], ["Confirm new password", "newPassword2", "password", "new-password"]], async (body) => {
+        if (body.newPassword !== body.newPassword2) throw new Error("The passwords don't match.");
+        await api("POST", "api/account/password", body);
+        toast("Password changed.");
+      }) }, "Change password"),
+      h("button", { class: "btn", onclick: () => reauthDialog("Set up a new authenticator", "Moving to a new phone? Confirm with your current code (or a recovery code), then scan a new QR code. The old app stops working.", [], async (body) => {
+        const r = await api("POST", "api/account/authenticator", body);
+        showAuth("enroll", { ...r, reset: true });
+      }) }, "New authenticator"),
+      h("button", { class: "btn", onclick: () => reauthDialog("New recovery codes", "Makes 10 new recovery codes. Your old ones stop working.", [], async (body) => {
+        const r = await api("POST", "api/account/recovery-codes", body);
+        showAuth("codes", { codes: r.recoveryCodes, next: () => { renderAcct(); route(); } });
+      }) }, "New recovery codes"),
+      h("button", { class: "btn danger", onclick: () => reauthDialog("Delete your account?", "This permanently erases your account and every biopic in it: photos, documents, scripts and films, including Recently deleted and any public links. It can't be undone. Download backups first if you want to keep anything.", [], async (body) => {
+        await api("POST", "api/account/delete", body);
+        ME = null;
+        try { localStorage.removeItem("bp_recent"); } catch {}
+        history.replaceState(null, "", location.pathname);
+        showAuth("signin");
+        toast("Your account and everything in it has been deleted.");
+      }, "Delete account forever") }, "Delete account…")),
+    h("div", { class: "row end" }, h("button", { class: "btn", onclick: () => d.close() }, "Close")));
+}
+
+/** Asks for password + current code before a sensitive change, then runs it. */
+function reauthDialog(title, text, extra, run, submitLabel = "Confirm") {
+  const fields = [["Current password", "password", "password", "current-password"], ...extra];
+  const f = authForm(async (fd) => {
+    await run(Object.fromEntries(fd.entries()));
+    d.close();
+  },
+    h("p", { class: "small" }, text),
+    ...fields.map(([label, name, type, ac]) => authInput(label, name, { type, autocomplete: ac, required: true })),
+    codeInput("Code from your authenticator app (or a recovery code)"),
+    h("div", { class: "row end" }, h("button", { class: "btn", type: "button", onclick: () => d.close() }, "Cancel"), h("button", { class: submitLabel.startsWith("Delete") ? "btn primary danger-fill" : "btn primary", type: "submit" }, submitLabel)));
+  const d = showDialog(title, f);
+  f.querySelector("input")?.focus();
+}
+
+// ---------- sharing a biopic publicly ----------
+const watchUrl = (id) => new URL(`watch/${id}`, location.href.split("#")[0]).href;
+function publicDialog() {
+  const set = async (pub) => {
+    try {
+      P = { ...(await api("POST", `api/projects/${P.id}/visibility`, { public: pub })), jobs: P.jobs };
+      d.close();
+      render();
+      if (pub) publicDialog();
+      else toast("This biopic is private again. The old link no longer works.");
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+  const url = watchUrl(P.id);
+  const d = showDialog(P.public ? "This biopic is public" : "Make this biopic public?",
+    h("p", {}, P.public
+      ? "Anyone with this link can watch the latest version of each film and see the photo thumbnails. They can't see or change anything else."
+      : "Anyone with the link will be able to watch the latest version of each film and see thumbnails of the included photos. Documents, original photos, the interview and scripts stay private, and only you can edit."),
+    P.public ? h("div", { class: "row" }, h("input", { value: url, readonly: true, onclick: (e) => e.target.select() }),
+      h("button", { class: "btn", onclick: () => (navigator.share ? navigator.share({ title: P.person.name, url }).catch(() => {}) : navigator.clipboard.writeText(url).then(() => toast("Link copied."))) }, navigator.share ? "Share…" : "Copy link"),
+      h("a", { class: "btn", href: url, target: "_blank" }, "Open")) : null,
+    h("p", { class: "small muted" }, "Only share films of people who agreed to it, and only with media you have the right to share."),
+    h("div", { class: "row end" },
+      h("button", { class: "btn", onclick: () => d.close() }, P.public ? "Close" : "Cancel"),
+      P.public ? h("button", { class: "btn danger", onclick: () => set(false) }, "Make private") : h("button", { class: "btn primary", onclick: () => set(true) }, "Make public")));
+}
+
+// ---------- native iOS app bridge (absent in browsers) ----------
+const nativeHandler = window.webkit?.messageHandlers?.bpNative;
+const native = nativeHandler ? (msg) => nativeHandler.postMessage(msg) : null;
+window.bpNative = {
+  deviceToken: null,
+  toast: (msg, err) => toast(msg, err),
+  open: (hash) => { if (ME) location.hash = hash; },
+  async registerDevice(token, environment) {
+    window.bpNative.deviceToken = token;
+    if (ME) await api("POST", "api/account/devices", { token, environment }).catch(() => {});
+  },
+};
+
+/** iPhone: the native picker keeps each photo's date and place and converts HEIC to JPEG before upload. */
+async function pickPhotosNative() {
+  try {
+    const res = await native({ type: "pickPhotos", uploadUrl: new URL(`api/projects/${P.id}/photos`, location.href.split("#")[0]).href });
+    if (!res) return;
+    const r = JSON.parse(res);
+    if (r.errors?.length) toast(r.errors.join("; "), true);
+    if (r.project) {
+      P = r.project;
+      render();
+      watchJobs();
+      if (!r.errors?.length) toast(`${r.added} photo${r.added === 1 ? "" : "s"} added.`);
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 // ---------- 1. person ----------
@@ -653,10 +930,12 @@ function vPerson() {
 }
 
 // ---------- 2. media ----------
-function dropZone(label, accept, multiple, onFiles, id) {
+function dropZone(label, accept, multiple, onFiles, id, onPick) {
   const input = h("input", { type: "file", accept, multiple, hidden: true, id });
   input.addEventListener("change", () => input.files.length && onFiles([...input.files]));
-  const z = h("div", { class: "drop", tabindex: 0, role: "button", onclick: () => input.click(), onkeydown: (e) => (e.key === "Enter" || e.key === " ") && input.click() }, label, input);
+  const pick = onPick || (() => input.click());
+  const z = h("div", { class: "drop", tabindex: 0, role: "button", onclick: pick, onkeydown: (e) => (e.key === "Enter" || e.key === " ") && pick() }, label, input,
+    onPick ? h("div", { class: "small muted", style: "margin-top:6px" }, h("a", { href: "#", onclick: (e) => { e.preventDefault(); e.stopPropagation(); input.click(); } }, "or choose from Files")) : null);
   z.addEventListener("dragover", (e) => { e.preventDefault(); z.classList.add("over"); });
   z.addEventListener("dragleave", () => z.classList.remove("over"));
   z.addEventListener("drop", (e) => { e.preventDefault(); z.classList.remove("over"); onFiles([...e.dataTransfer.files]); });
@@ -691,7 +970,7 @@ function vMedia() {
     h("h1", {}, "Photos & documents"),
     h("p", { class: "lead" }, "Drop in photos (dates and GPS are read from their metadata) and documents — résumés, diplomas, obituaries, letters, articles (PDF, image or text). The AI reads them and suggests timeline events."),
     h("div", { class: "grid2" },
-      dropZone("📷  Drop photos here or click to choose (JPEG, PNG, WebP, HEIC)", "image/*", true, (f) => uploadFiles(`api/projects/${P.id}/photos`, "photos", f).catch((e) => toast(e.message, true)), "photoInput"),
+      dropZone(native ? "📷  Tap to choose photos — their dates and places come along" : "📷  Drop photos here or click to choose (JPEG, PNG, WebP, HEIC)", "image/*", true, (f) => uploadFiles(`api/projects/${P.id}/photos`, "photos", f).catch((e) => toast(e.message, true)), "photoInput", native ? pickPhotosNative : null),
       dropZone("📄  Drop documents here (PDF, image scans, .txt)", ".pdf,.txt,.md,.csv,.json,.html,image/*", true, (f) => uploadFiles(`api/projects/${P.id}/documents`, "docs", f).catch((e) => toast(e.message, true)), "docInput"),
     ),
     P.documents.length
@@ -1145,6 +1424,7 @@ function vRender() {
     try {
       await flush();
       const j = await api("POST", `api/projects/${P.id}/render/${v}`);
+      native?.({ type: "wantNotifications" });
       updateJobUI(j);
       P.jobs = [...(P.jobs || []), j];
       render();
@@ -1212,7 +1492,7 @@ function vRender() {
             h("h2", { style: "margin:0" }, "📺 ", P.series.title || "Documentary series"),
             h("span", { class: "muted small" }, `${eps.length} episodes`),
             h("span", { class: "spacer" }),
-            unrendered ? h("button", { class: "btn primary", onclick: async () => { try { await flush(); const r = await api("POST", `api/projects/${P.id}/series/render-all`); for (const j of r) { updateJobUI(j); watchJob(j); } P.jobs = [...(P.jobs || []), ...r]; render(); toast(`${r.length} episode(s) queued; they render one after another.`); } catch (e) { toast(e.message, true); } } }, `Render ${unrendered} unrendered episode${unrendered > 1 ? "s" : ""}`) : null),
+            unrendered ? h("button", { class: "btn primary", onclick: async () => { try { await flush(); const r = await api("POST", `api/projects/${P.id}/series/render-all`); native?.({ type: "wantNotifications" }); for (const j of r) { updateJobUI(j); watchJob(j); } P.jobs = [...(P.jobs || []), ...r]; render(); toast(`${r.length} episode(s) queued; they render one after another.`); } catch (e) { toast(e.message, true); } } }, `Render ${unrendered} unrendered episode${unrendered > 1 ? "s" : ""}`) : null),
           ...eps.map(filmCard))
       : h("div", { class: "card muted small" }, "Want a multi-episode documentary? ", h("a", { href: "#", onclick: (e) => { e.preventDefault(); scriptTab = "series"; go("script"); } }, "Plan a series"), " on the Script step."),
     ...orphans.map(filmCard),
@@ -1220,4 +1500,10 @@ function vRender() {
 }
 
 // ---------- boot ----------
-api("GET", "api/health").then((x) => (health = x)).catch(() => {}).finally(route);
+api("GET", "api/health").then((x) => (health = x)).catch(() => {}).finally(async () => {
+  try { ME = (await api("GET", "api/auth/me")).user; } catch {}
+  if (!ME) return showAuth("signin");
+  renderAcct();
+  native?.({ type: "signedIn" });
+  route();
+});
