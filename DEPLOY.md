@@ -3,7 +3,7 @@
 One server serves everyone: the website, the iPhone app (which shows the same web pages), and the public watch links. Deploy the server and every platform gets the change. Only changes under `ios/` need a new App Store build.
 
 ## Requirements
-Node 20+, ffmpeg/ffprobe on PATH, and `npm ci` after every pull (1.1 adds the `qrcode` package).
+Node 20+, ffmpeg/ffprobe on PATH, and `npm ci` after every pull.
 
 ## Environment
 | Variable | Purpose |
@@ -23,19 +23,22 @@ Biopics made before accounts have no owner. They stay hidden until they're given
 
 1. Back up `data/` (or your `DATA_DIR`).
 2. `git pull && npm ci`, then restart the server.
-3. Open the site, **Create an account** for yourself and set up the authenticator.
-4. Stop the server, give yourself the old biopics, start it again:
+3. Stop the server, create your account and give it the old biopics, start it again:
    ```
+   node scripts/admin.js add-user <your-username> <password>
    node scripts/admin.js claim <your-username>
    ```
+   (Or create the account on the site with **Create an account**, then stop the server and run only `claim`.)
+
+Accounts are username + password. Sign-in limits repeated wrong passwords (10 per 15 minutes per account and per address).
 
 ## Admin
-Run on the server (stop the server first for `add-user`, `claim`, `reset-2fa` and `unpublish`):
+Run on the server (stop the server first for `add-user`, `claim`, `reset-password` and `unpublish`):
 ```
-node scripts/admin.js users                  # accounts and biopic counts
-node scripts/admin.js add-user <name> <pw>   # account that sets up its authenticator at first sign-in
-node scripts/admin.js claim <username>       # give unowned (pre-1.1) biopics to an account
-node scripts/admin.js reset-2fa <username>   # lost phone + recovery codes: new authenticator at next sign-in
+node scripts/admin.js users                          # accounts and biopic counts
+node scripts/admin.js add-user <name> <pw>           # create an account
+node scripts/admin.js claim <username>               # give unowned (pre-1.1) biopics to an account
+node scripts/admin.js reset-password <name> <pw>     # forgot password: set a new one, sign out everywhere
 node scripts/admin.js reports                # reports about public biopics
 node scripts/admin.js unpublish <projectId>  # take a public biopic down
 ```

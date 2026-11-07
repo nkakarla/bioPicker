@@ -19,7 +19,6 @@
     "express": "^5.2.1",
     "msedge-tts": "^2.0.8",
     "multer": "^2.4.0",
-    "qrcode": "^1.5.4",
     "sharp": "^0.35.5",
     "topojson-client": "^3.1.0",
     "world-atlas": "^2.0.2"

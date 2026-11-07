@@ -27,7 +27,7 @@ Signing is automatic with team XKQ3C2A6A9 (bundle id com.eperf.biopicker). Devel
 - **"Your film is ready" notifications:** permission is asked the first time you render; the server sends the push when the render finishes (needs `APNS_*` on the server, see ../DEPLOY.md). Tapping it opens that biopic's Render step.
 - **Save films to Photos** (or share them) from the MP4 download buttons.
 - **Share sheet** for Word, backup .zip and captions.
-- Authenticator setup opens the iPhone Passwords app (otpauth links); Terms, Privacy and public films open in an in-app browser.
+- Terms, Privacy and public films open in an in-app browser.
 - Native alert/confirm/prompt, pull-to-refresh, back/forward swipe, inline video, audio with the silent switch on. Web Inspector enabled: Safari ▸ Develop ▸ iPhone.
 
 ## How the page and the app talk

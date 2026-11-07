@@ -94,22 +94,15 @@ const needAI = () => {
 // ---------- meta ----------
 app.get("/api/health", (req, res) => res.json({ ok: true, ai: ai.aiConfigured(), version: "1.1.0", accounts: true, signups: auth.signupsOpen(), push: pushConfigured() }));
 
-// ---------- sign-up, sign-in, recovery ----------
+// ---------- sign-up, sign-in ----------
 app.get("/api/auth/me", (req, res) => res.json({ user: auth.publicUser(req.user) }));
-app.post("/api/auth/signup", wrap(async (req, res) => res.json(await auth.startSignup(req.body || {}, ip(req)))));
-app.post("/api/auth/enroll", wrap(async (req, res) => {
-  const { user, recoveryCodes } = auth.finishEnrolment(req.body || {});
-  if (!req.user || req.user.id !== user.id) signIn(req, res, user);
-  res.json({ user: auth.publicUser(user), recoveryCodes });
-}));
-app.post("/api/auth/login", wrap(async (req, res) => res.json(await auth.startLogin(req.body || {}, ip(req)))));
-app.post("/api/auth/verify", wrap(async (req, res) => {
-  const { user, usedRecoveryCode } = auth.finishLogin(req.body || {}, ip(req));
+app.post("/api/auth/signup", wrap(async (req, res) => {
+  const user = auth.signup(req.body || {}, ip(req));
   signIn(req, res, user);
-  res.json({ user: auth.publicUser(user), usedRecoveryCode });
+  res.json({ user: auth.publicUser(user) });
 }));
-app.post("/api/auth/recover", wrap(async (req, res) => {
-  const { user } = auth.recoverAccount(req.body || {}, ip(req));
+app.post("/api/auth/login", wrap(async (req, res) => {
+  const user = auth.login(req.body || {}, ip(req));
   signIn(req, res, user);
   res.json({ user: auth.publicUser(user) });
 }));
@@ -120,13 +113,11 @@ app.post("/api/auth/logout", (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- account settings (password + code required for each change) ----------
+// ---------- account settings (current password required for each change) ----------
 app.post("/api/account/password", wrap(async (req, res) => {
   auth.changePassword(req.user, req.body || {}, ip(req), req.sessionToken);
   res.json({ ok: true });
 }));
-app.post("/api/account/authenticator", wrap(async (req, res) => res.json(await auth.startNewAuthenticator(req.user, req.body || {}, ip(req)))));
-app.post("/api/account/recovery-codes", wrap(async (req, res) => res.json({ recoveryCodes: auth.regenerateRecoveryCodes(req.user, req.body || {}, ip(req)) })));
 app.post("/api/account/delete", wrap(async (req, res) => {
   auth.reauth(req.user, req.body || {}, ip(req));
   const mine = listProjects(req.user.id);

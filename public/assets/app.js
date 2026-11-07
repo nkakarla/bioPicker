@@ -608,15 +608,15 @@ async function newProject() {
   }
 }
 
-// ---------- accounts: sign in, sign up with an authenticator app (2FA), recovery ----------
-let ME = null; // signed-in user: { username, createdAt, recoveryCodesLeft }
+// ---------- accounts: sign in, sign up ----------
+let ME = null; // signed-in user: { username, createdAt }
 
 function showAuth(mode = "signin", data = {}) {
   P = null;
   renderProjBar();
   renderSteps();
   renderAcct();
-  const views = { signin: authSignIn, code: authCode, signup: authSignUp, enroll: authEnroll, codes: authRecoveryCodes, recover: authRecover };
+  const views = { signin: authSignIn, signup: authSignUp, recover: authRecover };
   fill(main, h("div", { class: "hero auth" }, (views[mode] || authSignIn)(data)));
   main.querySelector("input")?.focus();
 }
@@ -631,7 +631,6 @@ const authForm = (onSubmit, ...kids) => {
       await onSubmit(new FormData(f));
     } catch (er) {
       toast(er.message, true);
-      if (er.restart) showAuth(ME ? "signin" : "signup");
     } finally {
       btn.disabled = false;
     }
@@ -652,7 +651,6 @@ function authInput(label, name, attrs = {}) {
   } }, "👁");
   return h("label", { class: "f" }, label, h("span", { class: "pw-wrap" }, input, eye));
 }
-const codeInput = (label = "6-digit code") => authInput(label, "code", { inputmode: "numeric", autocomplete: "one-time-code", placeholder: "123456", maxlength: 12, required: true });
 const authLinks = (...links) => h("p", { class: "small muted authlinks" }, ...links.flatMap((l, i) => (i ? [" · ", l] : [l])));
 const linkTo = (label, mode) => h("a", { href: "#", onclick: (e) => { e.preventDefault(); showAuth(mode); } }, label);
 
@@ -662,8 +660,7 @@ function authSignIn() {
     h("p", {}, "Sign in to your BioPicker studio."),
     authForm(async (fd) => {
       const r = await api("POST", "api/auth/login", { username: fd.get("username"), password: fd.get("password") });
-      if (r.enroll) showAuth("enroll", { ...r, reset: true });
-      else showAuth("code", r);
+      signedIn(r.user);
     },
       authInput("Username", "username", { autocomplete: "username", autocapitalize: "none", spellcheck: "false", required: true }),
       authInput("Password", "password", { type: "password", autocomplete: "current-password", required: true }),
@@ -672,27 +669,14 @@ function authSignIn() {
   ];
 }
 
-function authCode({ challenge }) {
-  return [
-    h("h1", {}, "Enter your code"),
-    h("p", {}, "Open your authenticator app and enter the 6-digit code for BioPicker. Lost your phone? Enter one of your recovery codes instead."),
-    authForm(async (fd) => {
-      const r = await api("POST", "api/auth/verify", { challenge, code: fd.get("code") });
-      if (r.usedRecoveryCode) toast(`Recovery code used. You have ${r.user.recoveryCodesLeft} left; make new ones in Account settings.`);
-      signedIn(r.user);
-    }, codeInput("Code"), h("button", { class: "btn primary", type: "submit" }, "Verify")),
-    authLinks(linkTo("Start over", "signin")),
-  ];
-}
-
 function authSignUp() {
   return [
     h("h1", {}, "Create your account"),
-    h("p", {}, "Your biopics, photos and films are private to your account unless you choose to share a film. Accounts are protected with a password and a code from an authenticator app (two-factor authentication)."),
+    h("p", {}, "Your biopics, photos and films are private to your account unless you choose to share a film."),
     authForm(async (fd) => {
       if (fd.get("password") !== fd.get("password2")) throw new Error("The passwords don't match.");
       const r = await api("POST", "api/auth/signup", { username: fd.get("username"), password: fd.get("password"), agree: fd.get("agree") === "on" });
-      showAuth("enroll", r);
+      signedIn(r.user);
     },
       authInput("Username", "username", { autocomplete: "username", autocapitalize: "none", spellcheck: "false", placeholder: "3–32 letters or numbers", required: true }),
       authInput("Password", "password", { type: "password", autocomplete: "new-password", placeholder: "At least 10 characters", required: true }),
@@ -700,71 +684,15 @@ function authSignUp() {
       h("label", { class: "agree small" }, h("input", { type: "checkbox", name: "agree" }),
         h("span", {}, "I agree to the ", h("a", { href: "terms.html", target: "_blank" }, "Terms"), " and ", h("a", { href: "privacy.html", target: "_blank" }, "Privacy Policy"),
           ", including that the photos, documents and details I add are processed by AI services (Anthropic's Claude) to write my biopic.")),
-      h("button", { class: "btn primary", type: "submit" }, "Continue")),
+      h("button", { class: "btn primary", type: "submit" }, "Create account")),
     authLinks(h("span", {}, "Have an account? "), linkTo("Sign in", "signin")),
-  ];
-}
-
-function authEnroll({ enroll, qr, uri, secret, reset }) {
-  const onPhone = /iPhone|iPad|Android/i.test(navigator.userAgent);
-  return [
-    h("h1", {}, reset ? "Set up your authenticator again" : "Turn on two-factor sign-in"),
-    h("p", {}, "BioPicker asks for a 6-digit code from an authenticator app each time you sign in, so nobody can get in with your password alone."),
-    h("ol", { class: "enroll" },
-      h("li", {}, onPhone
-        ? [h("b", {}, "Add BioPicker to your authenticator. "), "On iPhone, tap the button to add it to the Passwords app, or use Google or Microsoft Authenticator.",
-            h("div", {}, h("a", { class: "btn", href: uri }, "＋ Add to authenticator app"))]
-        : [h("b", {}, "Scan this QR code "), "with an authenticator app (iPhone Passwords, Google Authenticator, Microsoft Authenticator, 1Password…)."]),
-      h("li", {}, h("div", { class: "qr", html: qr }), h("p", { class: "small muted" }, "Can't scan? Enter this key in the app: ", h("code", { class: "secret" }, secret))),
-      h("li", {}, h("b", {}, "Enter the 6-digit code "), "the app now shows for BioPicker.")),
-    authForm(async (fd) => {
-      const r = await api("POST", "api/auth/enroll", { enroll, code: fd.get("code") });
-      ME = r.user;
-      showAuth("codes", { codes: r.recoveryCodes, next: () => signedIn(r.user) });
-    }, codeInput(), h("button", { class: "btn primary", type: "submit" }, "Turn on and continue")),
-  ];
-}
-
-function recoveryCodesBlock(codes) {
-  const text = `BioPicker recovery codes for ${ME?.username || ""}\nEach code works once. Keep them somewhere safe.\n\n${codes.join("\n")}\n`;
-  return [
-    h("div", { class: "codes" }, ...codes.map((c) => h("code", {}, c))),
-    h("div", { class: "row", style: "justify-content:center" },
-      h("button", { class: "btn", type: "button", onclick: () => navigator.clipboard.writeText(text).then(() => toast("Copied."), () => toast("Couldn't copy; write them down instead.", true)) }, "Copy"),
-      h("button", { class: "btn", type: "button", onclick: () => {
-        const a = h("a", { href: URL.createObjectURL(new Blob([text], { type: "text/plain" })), download: "biopicker-recovery-codes.txt" });
-        document.body.append(a); a.click(); a.remove();
-      } }, "Save as file")),
-  ];
-}
-
-function authRecoveryCodes({ codes, next }) {
-  const go = h("button", { class: "btn primary", disabled: true, onclick: next }, "Continue");
-  return [
-    h("h1", {}, "Save your recovery codes"),
-    h("p", {}, "If you lose your phone or forget your password, a recovery code gets you back in. Each code works once. This is the only time they're shown."),
-    ...recoveryCodesBlock(codes),
-    h("label", { class: "agree small" }, h("input", { type: "checkbox", onchange: (e) => (go.disabled = !e.target.checked) }), h("span", {}, "I've saved these codes somewhere safe")),
-    h("div", { class: "row", style: "justify-content:center" }, go),
   ];
 }
 
 function authRecover() {
   return [
     h("h1", {}, "Forgot your password?"),
-    h("p", {}, "Use one of the recovery codes you saved when you created your account to choose a new password."),
-    authForm(async (fd) => {
-      if (fd.get("newPassword") !== fd.get("newPassword2")) throw new Error("The passwords don't match.");
-      const r = await api("POST", "api/auth/recover", { username: fd.get("username"), recoveryCode: fd.get("recoveryCode"), newPassword: fd.get("newPassword") });
-      toast(`Password changed. ${r.user.recoveryCodesLeft} recovery code(s) left.`);
-      signedIn(r.user);
-    },
-      authInput("Username", "username", { autocomplete: "username", autocapitalize: "none", spellcheck: "false", required: true }),
-      authInput("Recovery code", "recoveryCode", { autocapitalize: "none", autocomplete: "off", placeholder: "abcd-efgh", required: true }),
-      authInput("New password", "newPassword", { type: "password", autocomplete: "new-password", placeholder: "At least 10 characters", required: true }),
-      authInput("Confirm new password", "newPassword2", { type: "password", autocomplete: "new-password", required: true }),
-      h("button", { class: "btn primary", type: "submit" }, "Change password and sign in")),
-    h("p", { class: "small muted" }, "No recovery codes left? Contact ePerf support to verify your identity."),
+    h("p", {}, "Ask the person who runs this BioPicker to set a new password for you. Your biopics stay exactly as they are. Then sign in with the new password and change it under Account settings."),
     authLinks(linkTo("Back to sign in", "signin")),
   ];
 }
@@ -794,7 +722,7 @@ function renderAcct() {
   menu.append(
     h("summary", { class: "btn sm ghost", title: "Your account" }, `👤 ${ME.username} ▾`),
     h("div", { class: "pop" },
-      h("button", { onclick: () => { menu.open = false; accountDialog(); } }, h("b", {}, "Account settings"), h("span", {}, "Password, authenticator, recovery codes, delete account")),
+      h("button", { onclick: () => { menu.open = false; accountDialog(); } }, h("b", {}, "Account settings"), h("span", {}, "Change password, delete account")),
       h("button", { onclick: () => { menu.open = false; signOut(); } }, h("b", {}, "Sign out"), h("span", {}, "Sign out on this device"))));
   document.addEventListener("click", (e) => { if (!menu.contains(e.target)) menu.open = false; });
   fill(box, menu);
@@ -804,21 +732,12 @@ async function accountDialog() {
   try { ME = (await api("GET", "api/auth/me")).user || ME; } catch {}
   const d = showDialog("Account",
     h("p", {}, "Signed in as ", h("b", {}, ME.username), h("span", { class: "muted small" }, ` · member since ${new Date(ME.createdAt).toLocaleDateString([], { dateStyle: "medium" })}`)),
-    h("p", { class: "small muted" }, `${ME.recoveryCodesLeft} recovery code${ME.recoveryCodesLeft === 1 ? "" : "s"} left.`),
     h("div", { class: "acctacts" },
       h("button", { class: "btn", onclick: () => reauthDialog("Change password", "Choose a new password. You'll stay signed in here; other devices are signed out.", [["New password", "newPassword", "password", "new-password"], ["Confirm new password", "newPassword2", "password", "new-password"]], async (body) => {
         if (body.newPassword !== body.newPassword2) throw new Error("The passwords don't match.");
         await api("POST", "api/account/password", body);
         toast("Password changed.");
       }) }, "Change password"),
-      h("button", { class: "btn", onclick: () => reauthDialog("Set up a new authenticator", "Moving to a new phone? Confirm with your current code (or a recovery code), then scan a new QR code. The old app stops working.", [], async (body) => {
-        const r = await api("POST", "api/account/authenticator", body);
-        showAuth("enroll", { ...r, reset: true });
-      }) }, "New authenticator"),
-      h("button", { class: "btn", onclick: () => reauthDialog("New recovery codes", "Makes 10 new recovery codes. Your old ones stop working.", [], async (body) => {
-        const r = await api("POST", "api/account/recovery-codes", body);
-        showAuth("codes", { codes: r.recoveryCodes, next: () => { renderAcct(); route(); } });
-      }) }, "New recovery codes"),
       h("button", { class: "btn danger", onclick: () => reauthDialog("Delete your account?", "This permanently erases your account and every biopic in it: photos, documents, scripts and films, including Recently deleted and any public links. It can't be undone. Download backups first if you want to keep anything.", [], async (body) => {
         await api("POST", "api/account/delete", body);
         ME = null;
@@ -830,7 +749,7 @@ async function accountDialog() {
     h("div", { class: "row end" }, h("button", { class: "btn", onclick: () => d.close() }, "Close")));
 }
 
-/** Asks for password + current code before a sensitive change, then runs it. */
+/** Asks for the current password before a sensitive change, then runs it. */
 function reauthDialog(title, text, extra, run, submitLabel = "Confirm") {
   const fields = [["Current password", "password", "password", "current-password"], ...extra];
   const f = authForm(async (fd) => {
@@ -839,7 +758,6 @@ function reauthDialog(title, text, extra, run, submitLabel = "Confirm") {
   },
     h("p", { class: "small" }, text),
     ...fields.map(([label, name, type, ac]) => authInput(label, name, { type, autocomplete: ac, required: true })),
-    codeInput("Code from your authenticator app (or a recovery code)"),
     h("div", { class: "row end" }, h("button", { class: "btn", type: "button", onclick: () => d.close() }, "Cancel"), h("button", { class: submitLabel.startsWith("Delete") ? "btn primary danger-fill" : "btn primary", type: "submit" }, submitLabel)));
   const d = showDialog(title, f);
   f.querySelector("input")?.focus();
