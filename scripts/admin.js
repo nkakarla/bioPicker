@@ -8,7 +8,7 @@
 //   node scripts/admin.js reset-password <user> <pw>  forgot password: set a new one, sign out everywhere
 //   node scripts/admin.js reports                  list reports about public biopics
 //   node scripts/admin.js unpublish <projectId>    make a public biopic private
-// Copyright (c) 2026 ePerf
+// Copyright (c) 2026 EPerf
 import fs from "node:fs";
 import path from "node:path";
 import { adminCreateUser, adminSetPassword, allUsers, findUser } from "../lib/auth.js";

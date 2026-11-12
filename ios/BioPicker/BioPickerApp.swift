@@ -1,4 +1,4 @@
-// BioPicker iOS shell. Copyright (c) 2026 ePerf
+// BioPicker iOS shell. Copyright (c) 2026 EPerf
 //
 // A thin native wrapper around the BioPicker web app: a WKWebView pointed at a
 // running BioPicker server (see ios/README.md). All the work happens server side.

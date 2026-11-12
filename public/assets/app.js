@@ -1,4 +1,4 @@
-// BioPicker front end — © 2026 ePerf
+// BioPicker front end — © 2026 EPerf
 const $ = (s, el = document) => el.querySelector(s);
 const main = $("#main");
 
@@ -679,7 +679,7 @@ function authSignUp() {
       signedIn(r.user);
     },
       authInput("Username", "username", { autocomplete: "username", autocapitalize: "none", spellcheck: "false", placeholder: "3–32 letters or numbers", required: true }),
-      authInput("Password", "password", { type: "password", autocomplete: "new-password", placeholder: "At least 10 characters", required: true }),
+      authInput("Password", "password", { type: "password", autocomplete: "new-password", placeholder: "At least 8 characters", required: true }),
       authInput("Confirm password", "password2", { type: "password", autocomplete: "new-password", required: true }),
       h("label", { class: "agree small" }, h("input", { type: "checkbox", name: "agree" }),
         h("span", {}, "I agree to the ", h("a", { href: "terms.html", target: "_blank" }, "Terms"), " and ", h("a", { href: "privacy.html", target: "_blank" }, "Privacy Policy"),
@@ -842,8 +842,7 @@ function vPerson() {
     aiWarn(),
     h("div", { class: "card grid2" },
       field("Full name", "name", { ph: "Rose María Alvarez" }),
-      field("Goes by", "preferredName", { ph: "Grandma Rose" }),
-      field("Pronouns for narration", "pronouns", { select: [["she/her", "she/her"], ["he/him", "he/him"], ["they/them", "they/them"]] }),
+      field("Goes by (optional)", "preferredName", { ph: "Grandma Rose" }),
       field("Narration language", "language", { select: [["en", "English"], ["es", "Spanish"], ["fr", "French"], ["de", "German"], ["it", "Italian"], ["pt", "Portuguese"], ["hi", "Hindi"], ["zh", "Chinese"], ["ja", "Japanese"], ["ar", "Arabic"]] }),
       field("Date of birth", "born", { type: "date" }),
       field("Birthplace", "birthplace", { ph: "San Antonio, Texas, USA" }),

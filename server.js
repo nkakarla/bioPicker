@@ -1,5 +1,5 @@
 // BioPicker — AI biopic video maker. HTTP server.
-// Copyright (c) 2026 ePerf. All rights reserved.
+// Copyright (c) 2026 EPerf. All rights reserved.
 import fs from "node:fs";
 import path from "node:path";
 import express from "express";
