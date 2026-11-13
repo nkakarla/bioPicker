@@ -1,18 +1,19 @@
 // BioPicker — AI biopic video maker. HTTP server.
-// Copyright (c) 2026 ePerf. All rights reserved.
-import crypto from "node:crypto";
+// Copyright (c) 2026 EPerf. All rights reserved.
 import fs from "node:fs";
 import path from "node:path";
 import express from "express";
 import multer from "multer";
 import * as ai from "./lib/ai.js";
 import { geocode } from "./lib/geo.js";
-import { activeJobs, getJob, startJob } from "./lib/jobs.js";
+import * as auth from "./lib/auth.js";
+import { activeJobs, getJob, onJobFinished, startJob } from "./lib/jobs.js";
 import { fetchImage, fetchVideoClip } from "./lib/media.js";
 import { deletePhotoFiles, ingestPhoto } from "./lib/photos.js";
 import { renderFilm, resolveMedia } from "./lib/produce.js";
+import { notify, pushConfigured } from "./lib/push.js";
 import {
-  VERSION_RE, createProject, deleteProject, emptyProject, exportProject, importProject, listProjects, listSnapshots, listTrash,
+  VERSION_RE, allProjects, createProject, deleteProject, eraseOwner, trashOwner, emptyProject, exportProject, importProject, listProjects, listSnapshots, listTrash,
   loadProject, projectPath, purgeExpiredTrash, purgeFromTrash, restoreFromTrash, restoreSnapshot, saveProject, snapshotProject, syncRenders,
 } from "./lib/store.js";
 import { applyDocx, buildDocx, parseDocx, versionLabel } from "./lib/word.js";
@@ -22,7 +23,6 @@ import { DATA_DIR, ROOT, ensureDir, newId, sortByDate } from "./lib/util.js";
 
 const PORT = Number(process.env.PORT || 8095);
 const HOST = process.env.HOST || "127.0.0.1";
-const PASSCODE = process.env.APP_PASSCODE || "";
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
@@ -30,20 +30,39 @@ app.use(express.json({ limit: "5mb" }));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 60 * 1024 * 1024, files: 200 } });
 
-// ---------- optional passcode gate ----------
-const token = PASSCODE ? crypto.createHash("sha256").update("biopicker:" + PASSCODE).digest("hex").slice(0, 32) : "";
-app.post("/api/login", (req, res) => {
-  if (!PASSCODE || req.body?.passcode === PASSCODE) {
-    res.setHeader("Set-Cookie", `bp=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 90}${req.secure ? "; Secure" : ""}`);
-    return res.json({ ok: true });
-  }
-  res.status(401).json({ error: "Wrong passcode" });
-});
+// ---------- accounts ----------
+// Every request carries the signed-in user (if any). The API needs an account, except sign-in itself,
+// health, and public biopics. Each biopic belongs to one account; others get 404 for it.
+const ip = (req) => req.ip || "?";
+const secure = (req) => req.secure;
 app.use((req, res, next) => {
-  if (!PASSCODE) return next();
-  const ok = (req.headers.cookie || "").split(/;\s*/).includes(`bp=${token}`);
-  if (ok || req.path === "/" || req.path.startsWith("/assets/") || req.path === "/favicon.png") return next();
-  res.status(401).json({ error: "login required", login: true });
+  req.sessionToken = auth.readSessionToken(req.headers.cookie);
+  req.user = auth.sessionUser(req.sessionToken);
+  next();
+});
+const signIn = (req, res, u) => res.setHeader("Set-Cookie", auth.sessionCookie(auth.createSession(u), secure(req)));
+const OPEN_API = /^\/api\/(health|auth\/|public\/)/;
+app.use("/api", (req, res, next) => {
+  if (req.user || OPEN_API.test(req.originalUrl)) return next();
+  res.status(401).json({ error: "Please sign in.", login: true });
+});
+
+const owns = (req, p) => !!req.user && p.ownerId === req.user.id;
+const notFound = () => Object.assign(new Error("Project not found"), { status: 404 });
+/** Loads a biopic the signed-in user owns (404 otherwise, so ids of other people's biopics stay unknown). */
+function ownedProject(req, id = req.params.id) {
+  const p = loadProject(id);
+  if (!owns(req, p)) throw notFound();
+  return p;
+}
+app.use("/api/projects/:id", (req, res, next) => {
+  if (req.params.id === "import") return next();
+  try {
+    ownedProject(req);
+    next();
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 // app code revalidates on every load (cheap 304s) so a deploy shows up without a hard refresh
@@ -54,11 +73,11 @@ app.use(express.static(path.join(ROOT, "public"), {
 
 const wrap = (fn) => (req, res) =>
   Promise.resolve(fn(req, res)).catch((e) => {
-    console.error(e);
+    if (!e.status || e.status >= 500) console.error(e);
     res.status(e.status || 500).json({ error: e.message || String(e) });
   });
 
-const P = (req) => loadProject(req.params.id);
+const P = (req) => ownedProject(req);
 // films carry a full script snapshot each; the browser only needs to know one exists
 const publicFilm = ({ scriptSnapshot, ...f }) => ({ ...f, hasScript: !!scriptSnapshot });
 const publicProject = (p) => ({
@@ -73,11 +92,122 @@ const needAI = () => {
 };
 
 // ---------- meta ----------
-app.get("/api/health", (req, res) => res.json({ ok: true, ai: ai.aiConfigured(), version: "1.0.0" }));
+app.get("/api/health", (req, res) => res.json({ ok: true, ai: ai.aiConfigured(), version: "1.1.0", accounts: true, signups: auth.signupsOpen(), push: pushConfigured() }));
+
+// ---------- sign-up, sign-in ----------
+app.get("/api/auth/me", (req, res) => res.json({ user: auth.publicUser(req.user) }));
+app.post("/api/auth/signup", wrap(async (req, res) => {
+  const user = auth.signup(req.body || {}, ip(req));
+  signIn(req, res, user);
+  res.json({ user: auth.publicUser(user) });
+}));
+app.post("/api/auth/login", wrap(async (req, res) => {
+  const user = auth.login(req.body || {}, ip(req));
+  signIn(req, res, user);
+  res.json({ user: auth.publicUser(user) });
+}));
+app.post("/api/auth/logout", (req, res) => {
+  if (req.body?.deviceToken) auth.removeDevice(String(req.body.deviceToken));
+  auth.endSession(req.sessionToken);
+  res.setHeader("Set-Cookie", auth.sessionCookie("", secure(req), 0));
+  res.json({ ok: true });
+});
+
+// ---------- account settings (current password required for each change) ----------
+app.post("/api/account/password", wrap(async (req, res) => {
+  auth.changePassword(req.user, req.body || {}, ip(req), req.sessionToken);
+  res.json({ ok: true });
+}));
+app.post("/api/account/delete", wrap(async (req, res) => {
+  auth.reauth(req.user, req.body || {}, ip(req));
+  const mine = listProjects(req.user.id);
+  const busy = mine.flatMap((x) => activeJobs(x.id));
+  if (busy.length) throw Object.assign(new Error(`Wait for “${busy[0].label}” to finish, then delete your account.`), { status: 409 });
+  const erased = eraseOwner(req.user.id);
+  auth.deleteUser(req.user);
+  res.setHeader("Set-Cookie", auth.sessionCookie("", secure(req), 0));
+  res.json({ ok: true, erased });
+}));
+app.post("/api/account/devices", wrap(async (req, res) => {
+  auth.addDevice(req.user, req.body?.token, req.body?.environment);
+  res.json({ ok: true });
+}));
+
+// ---------- push: tell the owner when a film finishes rendering ----------
+onJobFinished(async (job) => {
+  if (job.type !== "render" || !pushConfigured()) return;
+  let p;
+  try {
+    p = loadProject(job.projectId);
+  } catch {
+    return;
+  }
+  const u = p.ownerId && auth.getUser(p.ownerId);
+  if (!u?.devices?.length) return;
+  const name = p.person.name || "Your biopic";
+  const ok = job.status === "done";
+  await notify(u.devices, {
+    title: ok ? "Your film is ready" : "Render didn't finish",
+    body: ok ? `${name}: ${versionLabel(job.version)} is ready to watch.` : `${name}: ${versionLabel(job.version)} — ${job.error || "something went wrong"}`,
+    data: { projectId: p.id, step: "render" },
+  }, (gone) => auth.removeDevice(gone));
+});
+
+// ---------- public biopics: anyone with the link can watch the latest films ----------
+const PUBLIC_DIRS = new Set(["output", "thumbs"]);
+function publicView(p) {
+  const films = Object.values(p.renders).sort((a, b) => String(a.version).localeCompare(String(b.version), "en", { numeric: true }));
+  return {
+    id: p.id,
+    name: p.person.name || "Untitled",
+    preferredName: p.person.preferredName || "",
+    born: p.person.born || "",
+    died: p.person.died || "",
+    claimToFame: p.person.claimToFame || "",
+    series: p.series?.title || "",
+    films: films.map((f) => ({ version: f.version, label: versionLabel(f.version), title: p.scripts[f.version]?.title || f.title || "", tagline: p.scripts[f.version]?.tagline || "", file: f.file, vtt: f.vtt || null, seconds: f.seconds, at: f.at, n: f.n })),
+    photos: p.photos.filter((ph) => ph.include !== false).slice(0, 60).map((ph) => ({ file: ph.file, caption: ph.caption || "", date: ph.date || "" })),
+    publishedAt: p.publishedAt,
+  };
+}
+const publicProjectOr404 = (id) => {
+  let p;
+  try {
+    p = loadProject(id);
+  } catch {
+    throw notFound();
+  }
+  if (!p.public) throw notFound();
+  return p;
+};
+app.get("/api/public/:id", wrap(async (req, res) => res.json(publicView(publicProjectOr404(req.params.id)))));
+const REPORTS_FILE = path.join(DATA_DIR, "reports.jsonl");
+const reportTimes = new Map();
+app.post("/api/public/:id/report", wrap(async (req, res) => {
+  const p = publicProjectOr404(req.params.id);
+  const recent = (reportTimes.get(ip(req)) || []).filter((t) => Date.now() - t < 3600000);
+  if (recent.length >= 5) throw Object.assign(new Error("Thanks — we already have your reports."), { status: 429 });
+  reportTimes.set(ip(req), [...recent, Date.now()]);
+  const reason = String(req.body?.reason || "").slice(0, 2000);
+  fs.appendFileSync(REPORTS_FILE, JSON.stringify({ at: new Date().toISOString(), projectId: p.id, name: p.person.name, ownerId: p.ownerId, reason, ip: ip(req), by: req.user?.username || null }) + "\n");
+  console.warn(`[report] ${p.id} “${p.person.name}”: ${reason.slice(0, 200)}`);
+  res.json({ ok: true });
+}));
+app.get("/watch/:id", (req, res) => res.sendFile(path.join(ROOT, "public", "watch.html")));
+
+app.post("/api/projects/:id/visibility", wrap(async (req, res) => {
+  const p = P(req);
+  const pub = req.body?.public === true;
+  if (pub && !p.films.length) throw Object.assign(new Error("Render a film before making this biopic public."), { status: 400 });
+  p.public = pub;
+  p.publishedAt = pub ? p.publishedAt || new Date().toISOString() : null;
+  saveProject(p);
+  res.json(publicProject(p));
+}));
 
 // ---------- projects ----------
-app.get("/api/projects", wrap(async (req, res) => res.json(listProjects())));
-app.post("/api/projects", wrap(async (req, res) => res.json(createProject(String(req.body?.name || "").slice(0, 120)))));
+app.get("/api/projects", wrap(async (req, res) => res.json(listProjects(req.user.id))));
+app.post("/api/projects", wrap(async (req, res) => res.json(createProject(String(req.body?.name || "").slice(0, 120), req.user.id))));
 
 // archive (hide from the main list) and delete (to Recently deleted for 30 days, then gone)
 app.post("/api/projects/:id/archive", wrap(async (req, res) => {
@@ -92,12 +222,17 @@ app.delete("/api/projects/:id", wrap(async (req, res) => {
   if (busy.length) throw Object.assign(new Error(`Wait for “${busy[0].label}” to finish before deleting this biopic.`), { status: 409 });
   res.json(deleteProject(p.id));
 }));
-app.get("/api/trash", wrap(async (req, res) => res.json(listTrash())));
+app.get("/api/trash", wrap(async (req, res) => res.json(listTrash(req.user.id))));
+const ownTrash = (req) => {
+  if (trashOwner(req.params.id) !== req.user.id) throw Object.assign(new Error("That biopic is no longer in Recently deleted."), { status: 404 });
+};
 app.post("/api/trash/:id/restore", wrap(async (req, res) => {
+  ownTrash(req);
   const p = restoreFromTrash(req.params.id);
   res.json({ id: p.id, name: p.person.name });
 }));
 app.delete("/api/trash/:id", wrap(async (req, res) => {
+  ownTrash(req);
   purgeFromTrash(req.params.id);
   res.json({ ok: true });
 }));
@@ -107,14 +242,14 @@ setInterval(() => { try { purgeExpiredTrash(); } catch (e) { console.error("tras
 // backup (download everything as one .zip) and restore (upload that .zip here or on another BioPicker)
 const importUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 * 1024, files: 1 } });
 app.get("/api/projects/:id/export", wrap(async (req, res) => {
-  const { project, entries } = exportProject(req.params.id);
+  const { project, entries } = exportProject(P(req).id);
   const slug = (project.person.name || "biopic").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "biopic";
   res.attachment(`biopicker-${slug}-${new Date().toLocaleDateString("en-CA")}.zip`);
   res.type("application/zip").send(writeZip(entries));
 }));
 app.post("/api/projects/import", importUpload.single("backup"), wrap(async (req, res) => {
   if (!req.file) throw Object.assign(new Error("Choose a BioPicker backup (.zip) to restore."), { status: 400 });
-  const { project, copy } = importProject(readZip(req.file.buffer));
+  const { project, copy } = importProject(readZip(req.file.buffer), req.user.id);
   res.json({ id: project.id, name: project.person.name, copy });
 }));
 app.get("/api/projects/:id", wrap(async (req, res) => res.json(publicProject(P(req)))));
@@ -605,7 +740,11 @@ app.post("/api/projects/:id/history/:file/restore", wrap(async (req, res) => {
 
 app.get("/api/jobs/:jid", (req, res) => {
   const j = getJob(req.params.jid);
-  if (!j) return res.status(404).json({ error: "job not found" });
+  let mine = false;
+  try {
+    mine = !!j && owns(req, loadProject(j.projectId));
+  } catch {}
+  if (!mine) return res.status(404).json({ error: "job not found" });
   res.json(jobView(j));
 });
 
@@ -616,9 +755,12 @@ app.get("/files/:id/:dir/:file", (req, res) => {
   if (!FILE_DIRS.has(dir) || !/^[A-Za-z0-9._-]+$/.test(file)) return res.status(400).end();
   let f;
   try {
+    const p = loadProject(id);
+    // owners see everything; anyone may see a public biopic's films and photo thumbnails
+    if (!owns(req, p) && !(p.public && PUBLIC_DIRS.has(dir))) return res.status(404).end();
     f = projectPath(id, dir, file);
   } catch {
-    return res.status(400).end();
+    return res.status(404).end();
   }
   if (!fs.existsSync(f)) return res.status(404).end();
   if (req.query.download) res.attachment(file);
@@ -626,5 +768,7 @@ app.get("/files/:id/:dir/:file", (req, res) => {
 });
 
 app.listen(PORT, HOST, () => {
+  const unowned = allProjects().filter((p) => !p.ownerId).length;
+  if (unowned) console.warn(`${unowned} biopic(s) from before accounts have no owner and are hidden. Assign them with: node scripts/admin.js claim <username>`);
   console.log(`BioPicker listening on http://${HOST}:${PORT} (AI ${ai.aiConfigured() ? "on" : "OFF"}, data ${DATA_DIR})`);
 });

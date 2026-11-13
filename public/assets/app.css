@@ -1,4 +1,4 @@
-/* BioPicker — © 2026 ePerf */
+/* BioPicker — © 2026 EPerf */
 :root {
   --bg: #0f0d0a;
   --panel: #19150f;
@@ -201,3 +201,29 @@ details.fold > summary { cursor: pointer; color: var(--muted); font-size: 14px; 
 @media (max-width: 640px) { .projitem { flex-direction: column; align-items: stretch; } .rowacts { flex-direction: row; justify-content: flex-end; } }
 .hero details.fold p.small { font-size: 13px; margin: 0 0 10px; text-align: left; }
 .hero .recent > p.small { font-size: 13px; text-align: left; }
+
+/* accounts */
+.acct { display: flex; align-items: center; }
+.proj:empty + .acct { margin-left: auto; }
+.hero.auth { max-width: 460px; margin: 0 auto; text-align: left; }
+.hero.auth h1 { text-align: left; }
+.hero.auth > p { text-align: left; margin-left: 0; }
+.authform { display: flex; flex-direction: column; gap: 12px; margin: 14px 0; }
+.authform .btn.primary { justify-content: center; }
+.authlinks { margin-top: 6px; }
+label.agree { display: flex; gap: 10px; align-items: flex-start; color: var(--muted); }
+label.agree input { margin-top: 3px; }
+.acctacts { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 16px; }
+dialog.bp .authform { margin: 6px 0 0; }
+.steps:empty { display: none; }
+/* with the step menu hidden (signed out, home page) give the page the full width */
+.shell:has(> .steps:empty) { grid-template-columns: 1fr; }
+.acct .menu > summary { white-space: nowrap; }
+.acct .menu .pop { left: auto; right: 0; }
+@media (max-width: 700px) { .top { flex-wrap: wrap; } .proj { order: 3; width: 100%; margin-left: 0; } .acct { margin-left: auto; } }
+
+/* show/hide password */
+.pw-wrap { position: relative; display: block; }
+.pw-wrap input { padding-right: 42px; }
+.pw-eye { all: unset; cursor: pointer; position: absolute; right: 8px; top: 50%; transform: translateY(-50%); font-size: 16px; line-height: 1; padding: 4px; border-radius: 6px; opacity: .8; }
+.pw-eye:hover, .pw-eye:focus-visible { opacity: 1; outline: 2px solid var(--gold); outline-offset: 1px; }

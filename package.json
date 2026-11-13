@@ -1,7 +1,7 @@
 {
   "name": "biopicker",
   "version": "1.0.0",
-  "description": "BioPicker - AI biopic video maker. Copyright (c) 2026 ePerf",
+  "description": "BioPicker - AI biopic video maker. Copyright (c) 2026 EPerf",
   "type": "module",
   "main": "server.js",
   "private": true,
@@ -17,7 +17,7 @@
     "docx": "^9.8.1",
     "exifr": "^7.1.3",
     "express": "^5.2.1",
-    "msedge-tts": "^2.0.8",
+    "msedge-tts": "^2.1.1",
     "multer": "^2.4.0",
     "sharp": "^0.35.5",
     "topojson-client": "^3.1.0",

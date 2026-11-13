@@ -8,3 +8,6 @@ desktop.ini
 conversation-*.txt
 *.log
 nagesh/
+ios/build/
+ios/**/xcuserdata/
+Easwar/
