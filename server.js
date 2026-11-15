@@ -896,7 +896,8 @@ function subText(s) {
   if (!s) return "";
   const end = s.periodEnd ? new Date(s.periodEnd).toISOString().slice(0, 10) : "";
   const prov = s.provider === "apple" ? `Apple${s.environment === "Sandbox" ? " (sandbox)" : ""}` : `Stripe${s.live === false ? " (test)" : ""}`;
-  return `${prov} · ${s.status}${s.cancelAtPeriodEnd ? " · cancels" : ""}${end ? ` · ${end}` : ""}`;
+  const refund = s.refund ? ` · refunded $${(s.refund.amountCents / 100).toFixed(2)}` : "";
+  return `${prov} · ${s.status}${s.cancelAtPeriodEnd ? " · cancels" : ""}${end ? ` · ${end}` : ""}${refund}`;
 }
 const hostOf = (url) => {
   try {
@@ -1045,6 +1046,13 @@ app.patch("/api/admin/accounts/:uid", wrap(async (req, res) => {
   }
   auth.updateUser(u);
   res.json({ ok: true });
+}));
+// end a web subscription now and refund part of this month's payment (the admin chooses the amount)
+app.get("/api/admin/accounts/:uid/refund", wrap(async (req, res) => res.json(await pay.refundQuote(accountUser(req.params.uid)))));
+app.post("/api/admin/accounts/:uid/refund", wrap(async (req, res) => {
+  const amount = Number(req.body?.amount);
+  if (!Number.isFinite(amount)) throw Object.assign(new Error("Enter the refund as an amount, e.g. 6.07."), { status: 400 });
+  res.json(await pay.refundAndEnd(accountUser(req.params.uid), { amountCents: Math.round(amount * 100) }));
 }));
 
 app.post("/api/admin/accounts", wrap(async (req, res) => {

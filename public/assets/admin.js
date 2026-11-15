@@ -438,6 +438,56 @@ async function addAccountDialog() {
   const d = dialog("Add an account", f);
 }
 
+/** End a web subscription now and refund part of this month's payment. */
+async function refundDialog(id, username, done) {
+  let q;
+  try {
+    q = await api("GET", `api/admin/accounts/${encodeURIComponent(id)}/refund`);
+  } catch (x) {
+    return toast(x.message, true);
+  }
+  const usd = (c) => `$${(c / 100).toFixed(2)}`;
+  const pct = (x) => `${Math.round(x * 100)}%`;
+  const amount = h("input", { name: "amount", type: "number", min: "0", step: "0.01", max: (q.refundableCents / 100).toFixed(2), value: (q.suggestedCents / 100).toFixed(2), style: "width:8em" });
+  const eu = h("input", { type: "checkbox" });
+  const btn = h("button", { class: "btn primary" });
+  const label = () => (btn.textContent = Number(amount.value) > 0 ? `End plan and refund $${Number(amount.value).toFixed(2)}` : "End plan, no refund");
+  amount.addEventListener("input", label);
+  eu.addEventListener("change", () => {
+    amount.value = ((eu.checked ? q.suggestedNoFeeCents : q.suggestedCents) / 100).toFixed(2);
+    label();
+  });
+  label();
+  const f = h("form", { class: "authform" },
+    q.chargeId
+      ? h("p", { class: "small" }, `Paid ${usd(q.paidCents)} on ${day(q.paidAt)} for ${day(q.periodStart)} – ${day(q.periodEnd)}.${q.refundableCents < q.paidCents ? ` ${usd(q.paidCents - q.refundableCents)} of it was already refunded.` : ""}`)
+      : h("p", { class: "small warn" }, "No payment was found for this month (for example a free trial or a 100% coupon), so there's nothing to refund."),
+    h("ul", { class: "small" },
+      h("li", {}, `${pct(q.shares.days)} of the month has gone`),
+      q.renderLimit ? h("li", {}, `${q.renders} of ${q.renderLimit} films made (${pct(q.shares.films)})`) : h("li", {}, `${q.renders} films made (no film limit)`),
+      q.aiBudget ? h("li", {}, `${money(q.aiCost)} of ${money(q.aiBudget)} AI allowance used (${pct(q.shares.ai)})`) : null,
+      h("li", {}, h("b", {}, `Counted as ${pct(q.usedShare)} used`), " (the largest of these)"),
+      q.chargeId ? h("li", {}, `Stripe's fee, which Stripe keeps on refunds: ${usd(q.feeCents)}${q.feeKnown ? "" : " (estimated)"}`) : null),
+    q.chargeId ? h("label", { class: "row small" }, eu, "EU/UK cancellation within 14 days: don't take off Stripe's fee") : null,
+    h("label", { class: "f" }, `Refund to their card (suggested ${usd(q.suggestedCents)}, at most ${usd(q.refundableCents)})`, amount),
+    h("p", { class: "small muted" }, `${username}'s plan ends now and the subscription is cancelled, so they won't be charged again. This can't be undone; they can subscribe again later.`),
+    h("div", { class: "row end" }, h("button", { type: "button", class: "btn", onclick: () => d.close() }, "Keep the plan"), btn));
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    btn.disabled = true;
+    try {
+      const r = await api("POST", `api/admin/accounts/${encodeURIComponent(id)}/refund`, { amount: Number(amount.value) });
+      d.close();
+      toast(r.refundedCents ? `Plan ended and ${usd(r.refundedCents)} refunded.` : "Plan ended.");
+    } catch (x) {
+      toast(x.message, true);
+      btn.disabled = false;
+    }
+    done();
+  });
+  const d = dialog("End plan now and refund", f);
+}
+
 /** A limit field: the plan's value, no limit, or a number of its own. */
 function limitField(label, name, override, planValue, fmt, step) {
   const mode = override === undefined ? "plan" : override === null ? "none" : "custom";
@@ -536,7 +586,9 @@ async function pageAccount(id) {
   const subCard = sub ? h("div", { class: "card" },
     h("b", {}, "Subscription"),
     h("div", { class: "small" }, `${sub.text}${sub.active ? "" : " (not active)"} · plan ${(billing.plans.find((p) => p.id === sub.planId) || {}).name || sub.planId}`),
-    h("div", { class: "small muted" }, sub.provider === "stripe" ? `Stripe customer ${sub.customer || "?"} · subscription ${sub.subscription || "?"}. Refunds and cancellations are done in the Stripe dashboard.` : `App Store original transaction ${sub.original}. Refunds are handled by Apple.`),
+    h("div", { class: "small muted" }, sub.provider === "stripe" ? `Stripe customer ${sub.customer || "?"} · subscription ${sub.subscription || "?"}. A refund made here or in the Stripe dashboard ends the plan at once.` : `App Store original transaction ${sub.original}. Only Apple can refund or cancel App Store subscriptions; a refund by Apple ends the plan at once.`),
+    sub.refund ? h("div", { class: "small" }, `Refunded $${(sub.refund.amountCents / 100).toFixed(2)} on ${when(sub.refund.at)}${sub.refund.inStripe ? " (in the Stripe dashboard)" : ""}.`) : null,
+    sub.provider === "stripe" && sub.active ? h("div", { class: "row" }, h("button", { class: "btn sm", onclick: () => refundDialog(id, acc.username, refresh) }, "End plan now and refund…")) : null,
     a.planChoice ? h("div", { class: "small warn" }, "A plan set here by the admin overrides the subscription.") : null) : null;
 
   const biopicCols = [
