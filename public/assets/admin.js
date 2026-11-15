@@ -266,10 +266,25 @@ const thisMonthKey = () => { const d = new Date(); return `${d.getFullYear()}-${
 const monthQ = () => { const m = qs().get("month"); return m ? `month=${encodeURIComponent(m)}` : ""; };
 const periodName = () => monthName(qs().get("month") || thisMonthKey());
 
+// warnings shown above every admin page (free spots running out or full)
+async function drawAlerts() {
+  const bar = $("#alertbar");
+  if (!bar) return;
+  try {
+    const { alerts } = await load("api/admin/alerts");
+    fill(bar, ...alerts.map((a) => h("div", { class: `alertbar ${a.level}`, role: "alert" },
+      h("span", { class: "ai", "aria-hidden": "true" }, "⚠"), h("span", {}, a.text), h("span", { class: "spacer" }),
+      a.tab && qs().get("tab") !== a.tab ? h("a", { href: `?tab=${a.tab}`, onclick: (e) => { e.preventDefault(); go({ tab: a.tab, id: null }); } }, "Sign-up settings") : null)));
+  } catch {
+    fill(bar);
+  }
+}
+
 async function route() {
   const q = qs();
   const tab = q.get("tab") || "overview";
   header(tab);
+  drawAlerts();
   const loading = h("div", { class: "state" }, "Loading…");
   if (!main.firstChild || main.dataset.tab !== tab + (q.get("id") || "")) fill(main, loading);
   main.dataset.tab = tab + (q.get("id") || "");
@@ -283,8 +298,8 @@ async function route() {
   }
 }
 
-function tile(label, value, note) {
-  return h("div", { class: "tile" }, h("div", { class: "tl" }, label), h("div", { class: "tv" }, value), note ? h("div", { class: "tn" }, note) : null);
+function tile(label, value, note, warn = false) {
+  return h("div", { class: warn ? "tile warn" : "tile", title: warn ? "Needs attention" : null }, h("div", { class: "tl" }, label), h("div", { class: "tv" }, value), note ? h("div", { class: "tn" }, note) : null);
 }
 const levelCols = [
   { key: "key", label: "Level", text: (r) => LEVEL_NAMES[r.key] || r.key },
@@ -326,7 +341,9 @@ async function pageOverview() {
       tile("Film minutes", mins(t.filmSeconds / 60).replace(" min", ""), `render time ${mins(t.renderSeconds / 60)}`),
       tile("Avg AI cost per film", t.renders ? money(t.aiCost / t.renders) : "—", "all AI cost ÷ films rendered"),
       tile("Accounts", int(o.accounts.total), `${o.accounts.activeInScope} active in this period${o.accounts.turnedOff ? ` · ${o.accounts.turnedOff} turned off` : ""}`),
-      tile("Free spots", o.freeSpots.max == null ? `${o.freeSpots.used}` : `${o.freeSpots.used} / ${o.freeSpots.max}`, o.freeSpots.max == null ? "no cap set" : o.freeSpots.waiting ? `${o.freeSpots.waiting} waiting for a plan` : `${Math.max(0, o.freeSpots.max - o.freeSpots.used)} left`),
+      tile("Free spots", o.freeSpots.max == null ? `${o.freeSpots.used}` : `${o.freeSpots.used} / ${o.freeSpots.max}`,
+        o.freeSpots.max == null ? "no cap set" : o.freeSpots.full ? `full${o.freeSpots.turnedAwayToday ? ` · ${o.freeSpots.turnedAwayToday} turned away today` : ""}` : o.freeSpots.waiting ? `${o.freeSpots.waiting} waiting for a plan` : `${Math.max(0, o.freeSpots.max - o.freeSpots.used)} left`,
+        o.freeSpots.warning || o.freeSpots.full),
       tile("Paying accounts", int(o.paying.count), `about ${money(o.paying.monthly)} a month before fees`),
       tile("Biopics", int(o.biopics), "all accounts")),
     h("h2", {}, "By film level"),
@@ -652,14 +669,41 @@ async function pagePlans() {
       h("div", { class: "grid2" }, h("label", { class: "f" }, "New accounts get", defaultSel), h("label", { class: "f" }, "Admins get", adminSel))),
     h("div", { class: "card" },
       h("h2", {}, "Sign-ups"),
-      h("p", { class: "small muted" }, `Free spots in use: ${r.freeSpots.used}${su.freeMax != null ? ` of ${su.freeMax}` : ""}${r.freeSpots.waiting ? ` · ${r.freeSpots.waiting} waiting for a plan` : ""}. A free spot is an account on the new-account plan that isn't paying, wasn't given a plan by you, and isn't turned off. Admin-made accounts and the ones you give a plan to don't count.`),
+      h("p", { class: "small muted" },
+        r.freeSpots.warning || r.freeSpots.full ? h("b", { class: "warn" }, "⚠ ") : null,
+        `Free spots in use: ${r.freeSpots.used}${su.freeMax != null ? ` of ${su.freeMax}` : ""}${r.freeSpots.waiting ? ` · ${r.freeSpots.waiting} waiting for a plan` : ""}${r.freeSpots.turnedAwayToday ? ` · ${r.freeSpots.turnedAwayToday} turned away today` : ""}. A free spot is an account on the new-account plan that isn't paying, wasn't given a plan by you, and isn't turned off. Admin-made accounts and the ones you give a plan to don't count.`),
       h("div", { class: "grid2" },
         h("label", { class: "f" }, "Most free accounts", numIn(su, "freeMax", { placeholder: "no cap", step: 1 })),
         h("label", { class: "f" }, "New accounts per IP address per day", numIn(su, "perIpPerDay", { placeholder: "no limit", step: 1 })),
         h("label", { class: "f" }, "When the free spots are full", h("select", { onchange: (e) => (su.whenFull = e.target.value) },
           h("option", { value: "closed", selected: su.whenFull !== "paid" ? true : null }, "Stop new sign-ups (show the message)"),
           h("option", { value: "paid", selected: su.whenFull === "paid" ? true : null }, "Let people sign up, but they must choose a paid plan"))),
-        h("label", { class: "f" }, "Message when sign-ups are stopped", txtIn(su, "fullMessage")))),
+        h("label", { class: "f" }, "Message when sign-ups are stopped", txtIn(su, "fullMessage")),
+        h("label", { class: "f" }, "Warn me when this many free spots are used", numIn(su, "alertAt", { placeholder: "off", step: 1 })),
+        h("label", { class: "f" }, "Send warnings to", txtIn(su, "alertEmail", { type: "email", placeholder: "you@example.com", autocomplete: "email" }))),
+      h("p", { class: "small muted" }, "You get an email each time a new free account brings the count to the warning level or above, and at most one a day when someone is turned away because the spots are full. The admin panel shows ⚠ at the top while it applies."),
+      h("div", { class: "row" },
+        h("span", { class: "small" }, r.email.ready ? yes(true, `email set up (sending as ${r.email.from})`) : yes(false, "", "email not set up: SMTP_HOST, SMTP_USER, SMTP_PASS in the server's .env (see DEPLOY.md); until then warnings only show here")),
+        h("span", { class: "spacer" }),
+        h("button", { type: "button", class: "btn sm", onclick: async (e) => {
+          e.target.disabled = true;
+          try {
+            const x = await api("POST", "api/admin/alerts/test");
+            toast(x.result === "sent" ? `Test email sent to ${x.to}.` : `Not sent: ${x.result}.`, x.result !== "sent");
+            cache.delete("api/admin/billing");
+          } catch (x) {
+            toast(x.message, true);
+          } finally {
+            e.target.disabled = false;
+          }
+        } }, "Send a test email")),
+      r.email.log.length ? h("details", {}, h("summary", { class: "small" }, `Recent warning emails (${r.email.log.length})`),
+        smallTable([
+          { key: "at", label: "When", text: (x) => when(x.at) },
+          { key: "to", label: "To" },
+          { key: "subject", label: "Subject" },
+          { key: "result", label: "Result" },
+        ], r.email.log, { sort: "at" })) : null),
     h("div", { class: "card" },
       h("h2", {}, "Payments"),
       h("p", { class: "small muted" }, "People choose a plan under Account settings, or when they reach a limit. On the website they pay by card through Stripe; in the iPhone app they pay through Apple (App Store rules require it). A plan is offered for sale when it has a Stripe price id (web) or an Apple product id (app). Their plan changes as soon as the payment is confirmed, and goes back when the subscription ends."),

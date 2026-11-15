@@ -26,7 +26,7 @@ code { font: 13px ui-monospace, Consolas, monospace; color: var(--gold2); }
 /* summary tiles */
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin: 16px 0 8px; }
 .tile { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
-.tile .tl { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.tile .tl { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .tile .tv { font-family: var(--serif); font-size: 26px; margin: 2px 0; }
 .tile .tn { font-size: 12px; color: var(--muted); }
 
@@ -89,3 +89,15 @@ table.et.edit td.center { text-align: center; }
 .adm .card > h2:first-child { margin-top: 0; }
 .adm .card > .row { margin: 10px 0; }
 .adm .warn { color: var(--gold2); }
+
+/* warnings above every admin page, and on a tile */
+.adm-alerts { max-width: 1400px; margin: 0 auto; padding: 0 24px; }
+.adm-alerts:empty { display: none; }
+.alertbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; padding: 10px 14px; border-radius: var(--radius); border: 1px solid #b8862f; background: rgba(214, 150, 40, .14); color: var(--text); font-size: 14px; }
+.alertbar .ai { color: #f0b545; font-weight: 700; }
+.tile.warn .tl::before { content: "⚠ "; color: #f0b545; font-weight: 700; }
+.alertbar .ai { font-size: 18px; line-height: 1; }
+.alertbar .spacer { flex: 1; }
+.alertbar a { white-space: nowrap; }
+.tile.warn { border-color: #b8862f; background: rgba(214, 150, 40, .1); }
+@media (max-width: 860px) { .adm-alerts { padding: 0 16px; } }

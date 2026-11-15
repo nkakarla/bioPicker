@@ -22,6 +22,7 @@ import { castingShortlist, listVoices, synthesize } from "./lib/tts.js";
 import * as usage from "./lib/usage.js";
 import * as pay from "./lib/payments.js";
 import * as visits from "./lib/visits.js";
+import * as alerts from "./lib/alerts.js";
 import { DATA_DIR, ROOT, ensureDir, newId, sortByDate } from "./lib/util.js";
 
 const VERSION = "1.2.0";
@@ -146,10 +147,17 @@ app.get("/api/health", (req, res) => res.json({ ok: true, ai: ai.aiConfigured(),
 // ---------- sign-up, sign-in ----------
 app.get("/api/auth/me", (req, res) => res.json({ user: me(req.user) }));
 app.post("/api/auth/signup", wrap(async (req, res) => {
-  const user = auth.signup(req.body || {}, ip(req), usage.signupGate);
+  let user;
+  try {
+    user = auth.signup(req.body || {}, ip(req), usage.signupGate);
+  } catch (e) {
+    if (e.signupsFull) alerts.turnedAway().catch(() => {});
+    throw e;
+  }
   auth.recordVisit(user, visits.visit(req, { referrer: visits.referrerOf(req.body, req), landing: visits.landingOf(req.body) }), "signup");
   signIn(req, res, user);
   res.json({ user: me(user) });
+  alerts.checkFreeSpots(user).catch(() => {}); // email the admin when the free spots reach the warning level
 }));
 app.post("/api/auth/login", wrap(async (req, res) => {
   const user = auth.login(req.body || {}, ip(req));
@@ -953,7 +961,7 @@ app.get("/api/admin/overview", wrap(async (req, res) => {
     since: events[0]?.at || null,
     model: ai.currentModel(),
     paying: { count: paying.length, monthly: paying.reduce((n, u) => n + (usage.planOf(u).priceMonthly || 0), 0) },
-    freeSpots: { used: usage.freeAccounts(users).length, max: b.signups.freeMax, waiting: users.filter((u) => usage.planSource(u) === "waiting").length },
+    freeSpots: { ...alerts.freeSpots(users), waiting: users.filter((u) => usage.planSource(u) === "waiting").length },
     totals: usage.totals(scoped),
     accounts: { total: users.length, turnedOff: users.filter((u) => u.disabled).length, activeInScope: new Set(scoped.map((e) => e.userId).filter(Boolean)).size },
     biopics: projects.length,
@@ -1062,12 +1070,19 @@ app.get("/api/admin/billing", wrap(async (req, res) => {
     defaultModel: ai.defaultModel,
     modelsSeen: seen,
     payments: pay.status(),
-    freeSpots: { used: usage.freeAccounts(users).length, waiting: users.filter((u) => usage.planSource(u) === "waiting").length },
+    freeSpots: { ...alerts.freeSpots(users), waiting: users.filter((u) => usage.planSource(u) === "waiting").length },
+    email: alerts.emailStatus(),
     webhooks: { stripe: `${origin(req)}/api/pay/stripe/webhook`, apple: `${origin(req)}/api/pay/apple/notifications` },
     geo: visits.geoReady(),
   });
 }));
-app.put("/api/admin/billing", wrap(async (req, res) => res.json({ billing: usage.saveBilling(req.body || {}) })));
+app.put("/api/admin/billing", wrap(async (req, res) => {
+  const billing = usage.saveBilling(req.body || {});
+  res.json({ billing });
+  alerts.checkFreeSpots().catch(() => {}); // a lower warning level may already be reached
+}));
+app.get("/api/admin/alerts", wrap(async (req, res) => res.json({ alerts: alerts.adminAlerts() })));
+app.post("/api/admin/alerts/test", wrap(async (req, res) => res.json(await alerts.testEmail())));
 
 const csvCell = (v) => (v == null ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
 app.get("/api/admin/usage.csv", wrap(async (req, res) => {

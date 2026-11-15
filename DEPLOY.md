@@ -17,6 +17,7 @@ Node 20+, ffmpeg/ffprobe on PATH, and `npm ci` after every pull.
 | `APPLE_BUNDLE_ID` | optional: the iPhone app's bundle id for In-App Purchase checks (default `com.eperf.biopicker`) |
 | `PUBLIC_URL` | optional: the site's address for Stripe's return links (default: the address the request came in on) |
 | `GEOIP=off` | optional: don't download the DB-IP place database (sign-in places then show as unknown) |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM` | optional: warning emails to the admin (free spots running out). Google Workspace / Gmail: `smtp.gmail.com`, `587`, the full address, and an app password (Google Account → Security → App passwords). Without them warnings only show in the admin panel |
 | `APNS_KEY_FILE`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPIC` | optional: "your film is ready" notifications on iPhone. Key from developer.apple.com → Keys → APNs. `APNS_TEAM_ID=XKQ3C2A6A9`, `APNS_TOPIC=com.eperf.biopicker` |
 | ~~`APP_PASSCODE`~~ | no longer used: accounts replace the shared passcode |
 
@@ -51,6 +52,8 @@ Limits stop new work only: a render or AI request that would go over the plan is
 **AI model:** Plans & paywall → AI prices → "Model BioPicker uses". Default Claude Sonnet 5. Takes effect on the next AI call.
 
 **Sign-ups:** Plans & paywall → Sign-ups: the most free accounts (blank = no cap), new accounts per IP address per day (default 3), and what happens when the free spots are full (stop sign-ups with your message, or let people sign up with no plan until they pay). Accounts you create or give a plan to don't use a free spot. An account waiting for a plan has a **Give a free spot** button on its page.
+
+**Free-spot warnings:** on the same card, "Warn me when this many free spots are used" and an email address. Each new free account at or above that number sends an email (so at 8, 9 and 10 of 10), and once the count drops below it the next crossing warns again. When the spots are full and someone is turned away you get at most one email a day. While it applies, every admin page shows a ⚠ banner and the Free spots tile is marked. **Send a test email** checks the SMTP settings; the last emails and their results are listed under it. State lives in `DATA_DIR/alerts.json`.
 
 **Where accounts come from:** sign-up IP, approximate place (city/region/country), device, and the referring page; the last 10 sign-ins; and "last seen" (updated at most every 6 hours). Places come from the free DB-IP City Lite database, downloaded to `DATA_DIR/geoip` (about 130 MB) shortly after start and refreshed monthly; no visitor IP is sent elsewhere. The admin panel shows the required "IP Geolocation by DB-IP" credit.
 
