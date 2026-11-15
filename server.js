@@ -912,7 +912,7 @@ function accountRow(u, events, projects, month) {
     plan: plan.id,
     planName: plan.name,
     custom: !!(u.plan || (u.limits && Object.keys(u.limits).length)),
-    source: SOURCE_NAMES[usage.planSource(u)],
+    source: usage.isAdmin(u) && usage.planSource(u) === "default" ? "Admin plan" : SOURCE_NAMES[usage.planSource(u)],
     payment: subText(u.sub),
     paying: !!usage.activeSub(u),
     signupPlace: placeText(u.signup?.place),
