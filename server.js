@@ -25,7 +25,7 @@ import * as visits from "./lib/visits.js";
 import * as alerts from "./lib/alerts.js";
 import { DATA_DIR, ROOT, ensureDir, newId, sortByDate } from "./lib/util.js";
 
-const VERSION = "1.2.0";
+const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
 
 const PORT = Number(process.env.PORT || 8095);
 const HOST = process.env.HOST || "127.0.0.1";
