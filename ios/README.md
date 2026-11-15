@@ -31,7 +31,20 @@ Signing is automatic with team XKQ3C2A6A9 (bundle id com.eperf.biopicker). Devel
 - Native alert/confirm/prompt, pull-to-refresh, back/forward swipe, inline video, audio with the silent switch on. Web Inspector enabled: Safari ▸ Develop ▸ iPhone.
 
 ## How the page and the app talk
-The page calls `window.webkit.messageHandlers.bpNative.postMessage({type})` (`pickPhotos`, `signedIn`, `wantNotifications`) and the app calls back into `window.bpNative` (`toast`, `registerDevice`). In a normal browser the handler doesn't exist and the page falls back to web behaviour, so the same server code serves both. Messages are only accepted from the configured server.
+The page calls `window.webkit.messageHandlers.bpNative.postMessage({type})` (`pickPhotos`, `signedIn`, `wantNotifications`, and for purchases `products`, `buy`, `finish`, `restore`) and the app calls back into `window.bpNative` (`toast`, `registerDevice`, `applePurchase`). The app adds `BioPickerApp/1.2` to its user agent so the server can tell it from Safari. In a normal browser the handler doesn't exist and the page falls back to web behaviour, so the same server code serves both. Messages are only accepted from the configured server.
 
 ## Push notifications and signing
 Push needs an explicit App ID with the Push Notifications capability, so the wildcard profile is no longer enough. With Xcode signed in (Settings ▸ Accounts) as an Admin of team XKQ3C2A6A9, `-allowProvisioningUpdates` registers it automatically.
+
+## In-App Purchase (paid plans)
+Paid plans are auto-renewable subscriptions bought with StoreKit 2 (`NativeBridge.swift`). The page asks the app for App Store prices, the app runs the purchase with an `appAccountToken` that ties it to the BioPicker account, and the server checks Apple's signature before changing the plan. A transaction is finished only after the server has recorded it; renewals, refunds and Ask to Buy approvals arrive through `Transaction.updates` and App Store Server Notifications. **Restore purchases** is in the Plans dialog (Apple requires it).
+
+Set up once in App Store Connect (Account Holder or Admin):
+1. Agreements, Tax, and Banking: accept the **Paid Apps** agreement and add bank and tax details. Nothing can be sold until this is active.
+2. Your app → Monetization → Subscriptions: create a subscription group (e.g. "BioPicker plans") and one auto-renewable subscription per paid plan, product id e.g. `com.eperf.biopicker.plus`, duration 1 month, price, display name and description, and a review screenshot of the Plans dialog.
+3. Copy each product id into the plan on the admin panel's Plans & paywall page.
+4. App Information → App Store Server Notifications: the address shown on Plans & paywall, **Version 2**, for Production and Sandbox.
+5. Users and Access → Sandbox → add a sandbox tester to try purchases on a device (Settings → App Store → Sandbox Account).
+6. Submit the subscriptions **with** a new app version: the first In-App Purchases of an app must be reviewed together with a build. Add a note for the reviewer with a demo account.
+
+The app's privacy label (App Privacy) also needs updating for purchases, coarse location (from IP) and device data; see ../public/privacy.html.

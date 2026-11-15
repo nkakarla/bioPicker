@@ -19,13 +19,40 @@ import {
 import { applyDocx, buildDocx, parseDocx, versionLabel } from "./lib/word.js";
 import { readZip, writeZip } from "./lib/zip.js";
 import { castingShortlist, listVoices, synthesize } from "./lib/tts.js";
+import * as usage from "./lib/usage.js";
+import * as pay from "./lib/payments.js";
+import * as visits from "./lib/visits.js";
 import { DATA_DIR, ROOT, ensureDir, newId, sortByDate } from "./lib/util.js";
+
+const VERSION = "1.2.0";
 
 const PORT = Number(process.env.PORT || 8095);
 const HOST = process.env.HOST || "127.0.0.1";
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
+
+// ---------- payment webhooks (raw body for signature checks, so before the JSON parser) ----------
+app.post("/api/pay/stripe/webhook", express.raw({ type: "*/*", limit: "1mb" }), async (req, res) => {
+  const raw = Buffer.isBuffer(req.body) ? req.body.toString("utf8") : "";
+  if (!pay.verifyStripeSignature(raw, req.get("stripe-signature"))) return res.status(400).json({ error: "bad signature" });
+  try {
+    await pay.stripeEvent(JSON.parse(raw));
+    res.json({ received: true });
+  } catch (e) {
+    console.error("[pay] Stripe webhook:", e.message);
+    res.status(500).json({ error: "could not apply the event; Stripe will retry" });
+  }
+});
+app.post("/api/pay/apple/notifications", express.json({ limit: "1mb" }), (req, res) => {
+  try {
+    res.json(pay.appleNotification(req.body?.signedPayload));
+  } catch (e) {
+    console.error("[pay] Apple notification:", e.message);
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
 app.use(express.json({ limit: "5mb" }));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 60 * 1024 * 1024, files: 200 } });
@@ -38,10 +65,16 @@ const secure = (req) => req.secure;
 app.use((req, res, next) => {
   req.sessionToken = auth.readSessionToken(req.headers.cookie);
   req.user = auth.sessionUser(req.sessionToken);
+  // "last seen" (time, address, place, device): at most every 6 hours per account
+  if (req.user && req.path.startsWith("/api/")) auth.touchSeen(req.user, visits.visit(req));
   next();
 });
+// AI calls and jobs started by this request are charged to this account (and biopic, set below)
+app.use(usage.usageMiddleware);
 const signIn = (req, res, u) => res.setHeader("Set-Cookie", auth.sessionCookie(auth.createSession(u), secure(req)));
-const OPEN_API = /^\/api\/(health|auth\/|public\/)/;
+/** The signed-in account as the browser sees it. */
+const me = (u) => u && { ...auth.publicUser(u), admin: usage.isAdmin(u) };
+const OPEN_API = /^\/api\/(health|auth\/|public\/|pay\/(stripe\/webhook|apple\/notifications)$)/;
 app.use("/api", (req, res, next) => {
   if (req.user || OPEN_API.test(req.originalUrl)) return next();
   res.status(401).json({ error: "Please sign in.", login: true });
@@ -59,6 +92,7 @@ app.use("/api/projects/:id", (req, res, next) => {
   if (req.params.id === "import") return next();
   try {
     ownedProject(req);
+    usage.setUsage({ projectId: req.params.id });
     next();
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
@@ -74,7 +108,9 @@ app.use(express.static(path.join(ROOT, "public"), {
 const wrap = (fn) => (req, res) =>
   Promise.resolve(fn(req, res)).catch((e) => {
     if (!e.status || e.status >= 500) console.error(e);
-    res.status(e.status || 500).json({ error: e.message || String(e) });
+    // 402 = a plan limit; the page can offer the upgrade link
+    const limit = e.status === 402 ? { paywall: !!e.paywall, upgradeUrl: e.upgradeUrl || "", plans: !!e.plans, plan: e.plan || "" } : {};
+    res.status(e.status || 500).json({ error: e.message || String(e), ...limit });
   });
 
 const P = (req) => ownedProject(req);
@@ -87,24 +123,39 @@ const publicProject = (p) => ({
   jobs: activeJobs(p.id).map(jobView),
 });
 const jobView = (j) => ({ id: j.id, type: j.type, version: j.version, label: j.label, status: j.status, progress: j.progress, error: j.error, log: j.log.slice(-40) });
-const needAI = () => {
+/** AI is set up, and the account still has AI allowance this month (and series in its plan, when asked). */
+const needAI = (req, opts) => {
   if (!ai.aiConfigured()) throw Object.assign(new Error("AI is not configured on this server (ANTHROPIC_API_KEY)."), { status: 503 });
+  usage.checkAI(req.user, opts);
 };
+/** Background photo/document reading is skipped for an account that has used its AI allowance. */
+const aiAllowed = (p) => {
+  try {
+    usage.checkAI(auth.getUser(p.ownerId));
+    return true;
+  } catch {
+    return false;
+  }
+};
+/** Renders queued or running across all of an account's biopics (they count toward the monthly limit). */
+const activeRenders = (u) => listProjects(u.id).reduce((n, x) => n + activeJobs(x.id).filter((j) => j.type === "render").length, 0);
 
 // ---------- meta ----------
-app.get("/api/health", (req, res) => res.json({ ok: true, ai: ai.aiConfigured(), version: "1.1.0", accounts: true, signups: auth.signupsOpen(), push: pushConfigured() }));
+app.get("/api/health", (req, res) => res.json({ ok: true, ai: ai.aiConfigured(), version: VERSION, accounts: true, signups: auth.signupsOpen(), push: pushConfigured() }));
 
 // ---------- sign-up, sign-in ----------
-app.get("/api/auth/me", (req, res) => res.json({ user: auth.publicUser(req.user) }));
+app.get("/api/auth/me", (req, res) => res.json({ user: me(req.user) }));
 app.post("/api/auth/signup", wrap(async (req, res) => {
-  const user = auth.signup(req.body || {}, ip(req));
+  const user = auth.signup(req.body || {}, ip(req), usage.signupGate);
+  auth.recordVisit(user, visits.visit(req, { referrer: visits.referrerOf(req.body, req), landing: visits.landingOf(req.body) }), "signup");
   signIn(req, res, user);
-  res.json({ user: auth.publicUser(user) });
+  res.json({ user: me(user) });
 }));
 app.post("/api/auth/login", wrap(async (req, res) => {
   const user = auth.login(req.body || {}, ip(req));
+  auth.recordVisit(user, visits.visit(req), "login");
   signIn(req, res, user);
-  res.json({ user: auth.publicUser(user) });
+  res.json({ user: me(user) });
 }));
 app.post("/api/auth/logout", (req, res) => {
   if (req.body?.deviceToken) auth.removeDevice(String(req.body.deviceToken));
@@ -123,6 +174,8 @@ app.post("/api/account/delete", wrap(async (req, res) => {
   const mine = listProjects(req.user.id);
   const busy = mine.flatMap((x) => activeJobs(x.id));
   if (busy.length) throw Object.assign(new Error(`Wait for “${busy[0].label}” to finish, then delete your account.`), { status: 409 });
+  // stop a web subscription before the account goes (fails the deletion if Stripe can't be reached, so nobody keeps being charged)
+  await pay.cancelForDeletion(req.user);
   const erased = eraseOwner(req.user.id);
   auth.deleteUser(req.user);
   res.setHeader("Set-Cookie", auth.sessionCookie("", secure(req), 0));
@@ -132,6 +185,67 @@ app.post("/api/account/devices", wrap(async (req, res) => {
   auth.addDevice(req.user, req.body?.token, req.body?.environment);
   res.json({ ok: true });
 }));
+/** The account's plan and how much of this month's allowance is used (no dollar amounts: those are for the admin). */
+app.get("/api/account/usage", wrap(async (req, res) => {
+  const m = usage.monthUsage(req.user, activeRenders(req.user));
+  const pw = usage.getBilling().paywall;
+  const sub = usage.activeSub(req.user);
+  res.json({
+    month: m.month,
+    plan: { id: m.plan.id, name: m.plan.name, priceMonthly: m.plan.priceMonthly, description: m.plan.description },
+    source: usage.planSource(req.user),
+    sub: sub && { provider: sub.provider, periodEnd: sub.periodEnd, cancelAtPeriodEnd: !!sub.cancelAtPeriodEnd, status: sub.status },
+    renders: { used: m.rendersUsed, limit: m.limits.rendersPerMonth },
+    aiShare: m.aiShare,
+    series: m.limits.series,
+    plans: pay.canSubscribe(),
+    upgrade: pw.enabled && pw.upgradeUrl ? { message: pw.message, url: pw.upgradeUrl } : null,
+  });
+}));
+
+// ---------- paying for a plan ----------
+// The address Stripe sends people back to: PUBLIC_URL if set, else the address this request came in on.
+const origin = (req) => (process.env.PUBLIC_URL || `${req.protocol}://${req.get("host")}`).replace(/\/+$/, "");
+app.get("/api/pay/plans", wrap(async (req, res) => res.json(pay.plansFor(req.user))));
+app.post("/api/pay/stripe/checkout", wrap(async (req, res) => res.json({ url: await pay.stripeCheckout(req.user, String(req.body?.planId || ""), origin(req)) })));
+app.post("/api/pay/stripe/portal", wrap(async (req, res) => res.json({ url: await pay.stripePortal(req.user, origin(req)) })));
+app.get("/api/pay/apple/token", wrap(async (req, res) => res.json({ accountToken: pay.appleAccountToken(req.user) })));
+app.post("/api/pay/apple/purchase", wrap(async (req, res) => {
+  // one signed transaction (after a purchase) or several (restore)
+  const list = Array.isArray(req.body?.transactions) ? req.body.transactions.slice(0, 20) : [req.body?.transaction];
+  let applied = 0;
+  let last = null;
+  for (const jws of list.filter(Boolean)) {
+    try {
+      pay.applePurchase(req.user, String(jws));
+      applied++;
+    } catch (e) {
+      last = e;
+    }
+  }
+  if (!applied && last) throw last;
+  const plan = usage.planOf(req.user);
+  res.json({ applied, plan: { id: plan.id, name: plan.name } });
+}));
+
+// ---------- usage: every finished render is logged with its account, level, film length and render time ----------
+onJobFinished((job) => {
+  if (job.type !== "render") return;
+  let filmSeconds = 0;
+  if (job.status === "done") {
+    try {
+      filmSeconds = loadProject(job.projectId).renders[job.version]?.seconds || 0;
+    } catch {}
+  }
+  usage.recordRender({
+    projectId: job.projectId,
+    version: job.version,
+    status: job.status === "done" ? "done" : "error",
+    filmSeconds,
+    wallSeconds: job.startedAt ? (job.finishedAt - job.startedAt) / 1000 : 0,
+    error: job.error,
+  });
+});
 
 // ---------- push: tell the owner when a film finishes rendering ----------
 onJobFinished(async (job) => {
@@ -339,7 +453,7 @@ app.post("/api/projects/:id/photos", upload.array("photos", 200), wrap(async (re
 
 /** Background AI look at newly added photos (description, caption, focal point). */
 function analyzePhotos(p, added) {
-  if (!added.length || !ai.aiConfigured()) return;
+  if (!added.length || !ai.aiConfigured() || !aiAllowed(p)) return;
   startJob({ projectId: p.id, type: "photos", label: `Analysing ${added.length} photo(s)` }, async ({ log, progress }) => {
     let n = 0;
     const ids = added.map((a) => a.id);
@@ -384,7 +498,7 @@ app.post("/api/projects/:id/documents", upload.array("docs", 30), wrap(async (re
   }
   p.documents.push(...added);
   saveProject(p);
-  if (added.length && ai.aiConfigured()) {
+  if (added.length && ai.aiConfigured() && aiAllowed(p)) {
     startJob({ projectId: p.id, type: "documents", label: `Reading ${added.length} document(s)` }, async ({ log, progress }) => {
       let n = 0;
       for (const d of added) {
@@ -416,7 +530,7 @@ app.delete("/api/projects/:id/documents/:did", wrap(async (req, res) => {
 
 // ---------- interview ----------
 app.post("/api/projects/:id/interview/next", wrap(async (req, res) => {
-  needAI();
+  needAI(req);
   const p = P(req);
   const { questions } = await ai.nextQuestions(p, 6);
   for (const q of questions) p.interview.push({ id: newId(8), ...q, answer: "" });
@@ -426,7 +540,7 @@ app.post("/api/projects/:id/interview/next", wrap(async (req, res) => {
 
 // ---------- history ----------
 app.post("/api/projects/:id/context", wrap(async (req, res) => {
-  needAI();
+  needAI(req);
   const p = P(req);
   if (!p.timeline.length) throw Object.assign(new Error("Add some timeline events first."), { status: 400 });
   const job = startJob({ projectId: p.id, type: "context", label: "Researching history" }, async ({ progress }) => {
@@ -442,7 +556,7 @@ app.post("/api/projects/:id/context", wrap(async (req, res) => {
 app.get("/api/voices", wrap(async (req, res) => res.json(await listVoices())));
 
 app.post("/api/projects/:id/voice/cast", wrap(async (req, res) => {
-  needAI();
+  needAI(req);
   const p = P(req);
   const voices = await castingShortlist(p.person.language || "en");
   const pick = await ai.castVoice(p, voices);
@@ -498,8 +612,9 @@ const episodeOf = (p, v) => (v.startsWith("ep") ? p.series?.episodes?.find((e) =
 const secondsFor = (p, v) => (v === "short" ? p.settings.shortSeconds : v === "long" ? p.settings.longSeconds : p.settings.episodeSeconds);
 const busyWith = (p, type, version) => activeJobs(p.id).some((j) => j.type === type && (!version || j.version === version));
 
-/** Writes (or rewrites) one version's script and finds its media. */
-async function writeVersionScript(p, version, { log, progress = () => {} }) {
+/** Writes (or rewrites) one version's script and finds its media. AI usage is charged to that version's level. */
+const writeVersionScript = (p, version, opts) => usage.withUsage({ version }, () => writeVersionScriptNow(p, version, opts));
+async function writeVersionScriptNow(p, version, { log, progress = () => {} }) {
   const episode = episodeOf(p, version);
   if (version.startsWith("ep") && !episode) throw new Error(`Episode ${version.slice(2)} isn't in the series plan.`);
   const secs = secondsFor(p, version);
@@ -520,9 +635,9 @@ async function writeVersionScript(p, version, { log, progress = () => {} }) {
 }
 
 app.post("/api/projects/:id/scripts/:version", wrap(async (req, res) => {
-  needAI();
   const p = P(req);
   const version = checkVersion(req.params.version);
+  needAI(req, { series: version.startsWith("ep") });
   if (version.startsWith("ep") && !episodeOf(p, version)) throw Object.assign(new Error("Plan the series first."), { status: 400 });
   if (busyWith(p, "script", version)) throw Object.assign(new Error(`${versionLabel(version)} is already being written.`), { status: 409 });
   const job = startJob({ projectId: p.id, type: "script", version, label: `Writing ${versionLabel(version)}` }, async ({ log, progress }) => {
@@ -535,7 +650,7 @@ app.post("/api/projects/:id/scripts/:version", wrap(async (req, res) => {
 
 // ---------- documentary series ----------
 app.post("/api/projects/:id/series/plan", wrap(async (req, res) => {
-  needAI();
+  needAI(req, { series: true });
   const p = P(req);
   if (!p.timeline.length && !p.interview.some((q) => q.answer)) throw Object.assign(new Error("Add some timeline events or interview answers first, so there is a story to split into episodes."), { status: 400 });
   if (busyWith(p, "series")) throw Object.assign(new Error("The series is already being planned."), { status: 409 });
@@ -572,7 +687,7 @@ app.put("/api/projects/:id/series", wrap(async (req, res) => {
 }));
 
 app.post("/api/projects/:id/series/write-all", wrap(async (req, res) => {
-  needAI();
+  needAI(req, { series: true });
   const p = P(req);
   const eps = p.series?.episodes || [];
   const todo = eps.filter((e) => req.body?.all || !p.scripts[`ep${e.n}`]).map((e) => `ep${e.n}`);
@@ -592,6 +707,7 @@ app.post("/api/projects/:id/series/render-all", wrap(async (req, res) => {
   const p = P(req);
   const todo = (p.series?.episodes || []).map((e) => `ep${e.n}`).filter((v) => p.scripts[v] && !busyWith(p, "render", v) && (req.body?.all || !p.renders[v]));
   if (!todo.length) throw Object.assign(new Error("No episodes to render: write the episode scripts first (already-rendered ones are skipped)."), { status: 400 });
+  usage.checkRender(req.user, todo, activeRenders(req.user));
   const jobs = todo.map((v) => startJob({ projectId: p.id, type: "render", lane: "render", version: v, label: `Rendering ${versionLabel(v)}` }, ({ log, progress }) => renderFilm(p, v, { log, progress })));
   res.json(jobs.map(jobView));
 }));
@@ -628,7 +744,7 @@ app.put("/api/projects/:id/scripts/:version", wrap(async (req, res) => {
 app.post("/api/projects/:id/scripts/:version/media", wrap(async (req, res) => {
   const p = P(req);
   const version = checkVersion(req.params.version);
-  const job = startJob({ projectId: p.id, type: "media", label: "Finding media" }, ({ log }) => resolveMedia(p, version, log));
+  const job = startJob({ projectId: p.id, type: "media", version, label: "Finding media" }, ({ log }) => resolveMedia(p, version, log));
   res.json(jobView(job));
 }));
 
@@ -666,6 +782,7 @@ app.post("/api/projects/:id/render/:version", wrap(async (req, res) => {
   const version = checkVersion(req.params.version);
   if (!p.scripts[version]) throw Object.assign(new Error("Write the script first."), { status: 400 });
   if (busyWith(p, "render", version)) throw Object.assign(new Error(`${versionLabel(version)} is already rendering or queued.`), { status: 409 });
+  usage.checkRender(req.user, [version], activeRenders(req.user));
   const job = startJob({ projectId: p.id, type: "render", lane: "render", version, label: `Rendering ${versionLabel(version)}` }, ({ log, progress }) =>
     renderFilm(p, version, { log, progress }));
   res.json(jobView(job));
@@ -747,6 +864,224 @@ app.get("/api/jobs/:jid", (req, res) => {
   if (!mine) return res.status(404).json({ error: "job not found" });
   res.json(jobView(j));
 });
+
+// ---------- admin panel: accounts, usage & cost, plans & paywall ----------
+// Only accounts named in ADMIN_USERS (default: nkakarla). Everyone else gets 404, as if it didn't exist.
+app.use("/api/admin", (req, res, next) => (usage.isAdmin(req.user) ? next() : res.status(404).json({ error: "Not found" })));
+
+const MONTH_RE = /^\d{4}-\d{2}$/;
+const monthParam = (req) => (MONTH_RE.test(String(req.query.month || "")) ? String(req.query.month) : req.query.month === "all" ? null : usage.thisMonth());
+const byUser = () => {
+  const m = new Map();
+  for (const e of usage.allEvents()) {
+    if (!m.has(e.userId)) m.set(e.userId, []);
+    m.get(e.userId).push(e);
+  }
+  return m;
+};
+const lastAt = (list) => list.reduce((a, e) => (e.at > a ? e.at : a), "");
+const accountUser = (id) => auth.getUser(id) || (() => { throw Object.assign(new Error("No such account."), { status: 404 }); })();
+
+const placeText = (p) => visits.placeText(p);
+const SOURCE_NAMES = { admin: "Set by admin", subscription: "Paying", waiting: "Waiting for a plan", default: "Free spot" };
+function subText(s) {
+  if (!s) return "";
+  const end = s.periodEnd ? new Date(s.periodEnd).toISOString().slice(0, 10) : "";
+  const prov = s.provider === "apple" ? `Apple${s.environment === "Sandbox" ? " (sandbox)" : ""}` : `Stripe${s.live === false ? " (test)" : ""}`;
+  return `${prov} · ${s.status}${s.cancelAtPeriodEnd ? " · cancels" : ""}${end ? ` · ${end}` : ""}`;
+}
+const hostOf = (url) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+};
+function accountRow(u, events, projects, month) {
+  const plan = usage.planOf(u);
+  const lim = usage.limitsOf(u);
+  const inMonth = events.filter((e) => usage.monthOf(e.at) === (month || usage.thisMonth()));
+  const m = usage.totals(inMonth);
+  const all = usage.totals(events);
+  return {
+    id: u.id,
+    username: u.username,
+    createdAt: u.createdAt,
+    lastLoginAt: u.lastLoginAt || null,
+    lastActivity: lastAt(events) || null,
+    plan: plan.id,
+    planName: plan.name,
+    custom: !!(u.plan || (u.limits && Object.keys(u.limits).length)),
+    source: SOURCE_NAMES[usage.planSource(u)],
+    payment: subText(u.sub),
+    paying: !!usage.activeSub(u),
+    signupPlace: placeText(u.signup?.place),
+    signupCountry: u.signup?.place?.country || "",
+    signupIp: u.signup?.ip || "",
+    signupDevice: u.signup?.device || "",
+    referrer: u.signup?.referrer ? hostOf(u.signup.referrer) : "",
+    lastIp: u.lastSeen?.ip || u.logins?.[0]?.ip || "",
+    lastPlace: placeText(u.lastSeen?.place || u.logins?.[0]?.place),
+    lastDevice: u.lastSeen?.device || u.logins?.[0]?.device || "",
+    lastSeenAt: u.lastSeen?.at || null,
+    admin: usage.isAdmin(u),
+    status: u.disabled ? "Turned off" : "Active",
+    biopics: projects.length,
+    films: projects.reduce((n, p) => n + p.films.length, 0),
+    rendersMonth: m.renders,
+    renderLimit: lim.rendersPerMonth,
+    aiCostMonth: m.aiCost,
+    aiBudget: lim.aiBudgetMonthly,
+    aiCostTotal: all.aiCost,
+    tokensTotal: all.tokensIn + all.tokensOut + all.cacheRead + all.cacheWrite,
+    rendersTotal: all.renders,
+    devices: (u.devices || []).length,
+  };
+}
+
+app.get("/api/admin/overview", wrap(async (req, res) => {
+  const month = monthParam(req);
+  const events = usage.allEvents();
+  const scoped = month ? events.filter((e) => usage.monthOf(e.at) === month) : events;
+  const projects = allProjects();
+  const users = auth.allUsers();
+  const paying = users.filter((u) => usage.activeSub(u));
+  const b = usage.getBilling();
+  res.json({
+    month: month || "all",
+    thisMonth: usage.thisMonth(),
+    since: events[0]?.at || null,
+    model: ai.currentModel(),
+    paying: { count: paying.length, monthly: paying.reduce((n, u) => n + (usage.planOf(u).priceMonthly || 0), 0) },
+    freeSpots: { used: usage.freeAccounts(users).length, max: b.signups.freeMax, waiting: users.filter((u) => usage.planSource(u) === "waiting").length },
+    totals: usage.totals(scoped),
+    accounts: { total: users.length, turnedOff: users.filter((u) => u.disabled).length, activeInScope: new Set(scoped.map((e) => e.userId).filter(Boolean)).size },
+    biopics: projects.length,
+    byLevel: usage.groupTotals(scoped, (e) => e.level),
+    byTask: usage.groupTotals(scoped.filter((e) => e.t === "ai"), (e) => e.task || "other"),
+    byModel: usage.groupTotals(scoped.filter((e) => e.t === "ai"), (e) => e.model),
+    byMonth: usage.groupTotals(events, (e) => usage.monthOf(e.at)).sort((a, b) => b.key.localeCompare(a.key)),
+    unpriced: usage.unpricedModels(),
+  });
+}));
+
+app.get("/api/admin/accounts", wrap(async (req, res) => {
+  const month = monthParam(req);
+  const ev = byUser();
+  const projects = allProjects();
+  res.json(auth.allUsers().map((u) => accountRow(u, ev.get(u.id) || [], projects.filter((p) => p.ownerId === u.id), month)));
+}));
+
+app.get("/api/admin/accounts/:uid", wrap(async (req, res) => {
+  const u = accountUser(req.params.uid);
+  const events = usage.allEvents().filter((e) => e.userId === u.id);
+  const projects = allProjects().filter((p) => p.ownerId === u.id);
+  const names = Object.fromEntries(projects.map((p) => [p.id, p.person.name || "Untitled"]));
+  res.json({
+    account: accountRow(u, events, projects, null),
+    planChoice: u.plan || "",
+    needsPlan: !!u.needsPlan,
+    sub: u.sub ? { ...u.sub, text: subText(u.sub), active: !!usage.activeSub(u) } : null,
+    signup: u.signup ? { ...u.signup, placeText: placeText(u.signup.place) } : null,
+    logins: (u.logins || []).map((l) => ({ ...l, placeText: placeText(l.place) })),
+    lastSeen: u.lastSeen ? { ...u.lastSeen, placeText: placeText(u.lastSeen.place) } : null,
+    limits: u.limits || {},
+    biopics: projects.map((p) => {
+      const pe = events.filter((e) => e.projectId === p.id);
+      const lv = Object.fromEntries(usage.LEVELS.map((l) => [l, usage.totals(pe.filter((e) => e.level === l))]));
+      const t = usage.totals(pe);
+      return {
+        id: p.id, name: names[p.id], archived: !!p.archivedAt, public: !!p.public, films: p.films.length,
+        aiCost: t.aiCost, tokens: t.tokensIn + t.tokensOut + t.cacheRead + t.cacheWrite, renders: t.renders, rendersFailed: t.rendersFailed,
+        shortCost: lv.short.aiCost, longCost: lv.long.aiCost, episodeCost: lv.episode.aiCost, setupCost: lv.setup.aiCost,
+        filmMinutes: t.filmSeconds / 60, renderMinutes: t.renderSeconds / 60,
+        updatedAt: p.updatedAt,
+      };
+    }),
+    byMonth: usage.groupTotals(events, (e) => usage.monthOf(e.at)).sort((a, b) => b.key.localeCompare(a.key)),
+    // the most recent 500 events; the CSV export has everything
+    events: events.slice(-500).reverse().map((e) => ({ ...e, biopic: names[e.projectId] || (e.projectId ? "(deleted)" : ""), cost: usage.costOf(e) })),
+    plans: usage.getBilling().plans.map((p) => ({ id: p.id, name: p.name })),
+  });
+}));
+
+app.patch("/api/admin/accounts/:uid", wrap(async (req, res) => {
+  const u = accountUser(req.params.uid);
+  const b = req.body || {};
+  if ("plan" in b) {
+    const plan = String(b.plan || "");
+    if (plan && !usage.getBilling().plans.some((p) => p.id === plan)) throw Object.assign(new Error("Unknown plan."), { status: 400 });
+    if (plan) u.plan = plan;
+    else delete u.plan;
+  }
+  if (b.limits && typeof b.limits === "object") {
+    // each limit is "plan" (use the plan's), "" (no limit) or a number
+    const out = {};
+    for (const k of ["rendersPerMonth", "aiBudgetMonthly"]) {
+      const v = b.limits[k];
+      if (v === undefined || v === "plan") continue;
+      if (v === "" || v === null) out[k] = null;
+      else {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n < 0) throw Object.assign(new Error("Limits must be a number of 0 or more, blank for no limit, or the plan's."), { status: 400 });
+        out[k] = n;
+      }
+    }
+    if (b.limits.series === true || b.limits.series === false) out.series = b.limits.series;
+    u.limits = out;
+  }
+  if (b.needsPlan === false) delete u.needsPlan; // "give a free spot"
+  if ("disabled" in b) {
+    if (b.disabled && u.id === req.user.id) throw Object.assign(new Error("You can't turn off your own account."), { status: 400 });
+    u.disabled = !!b.disabled;
+  }
+  auth.updateUser(u);
+  res.json({ ok: true });
+}));
+
+app.post("/api/admin/accounts", wrap(async (req, res) => {
+  const u = auth.adminCreateUser(req.body?.username, req.body?.password);
+  if (req.body?.plan) {
+    u.plan = String(req.body.plan);
+    auth.updateUser(u);
+  }
+  res.json({ id: u.id, username: u.username });
+}));
+
+app.post("/api/admin/accounts/:uid/password", wrap(async (req, res) => {
+  auth.adminSetPassword(accountUser(req.params.uid), req.body?.password);
+  res.json({ ok: true });
+}));
+
+app.get("/api/admin/billing", wrap(async (req, res) => {
+  const seen = [...new Set(usage.allEvents().filter((e) => e.t === "ai").map((e) => e.model))];
+  const users = auth.allUsers();
+  res.json({
+    billing: usage.getBilling(),
+    model: ai.currentModel(),
+    defaultModel: ai.defaultModel,
+    modelsSeen: seen,
+    payments: pay.status(),
+    freeSpots: { used: usage.freeAccounts(users).length, waiting: users.filter((u) => usage.planSource(u) === "waiting").length },
+    webhooks: { stripe: `${origin(req)}/api/pay/stripe/webhook`, apple: `${origin(req)}/api/pay/apple/notifications` },
+    geo: visits.geoReady(),
+  });
+}));
+app.put("/api/admin/billing", wrap(async (req, res) => res.json({ billing: usage.saveBilling(req.body || {}) })));
+
+const csvCell = (v) => (v == null ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+app.get("/api/admin/usage.csv", wrap(async (req, res) => {
+  const month = monthParam(req);
+  const names = Object.fromEntries(allProjects().map((p) => [p.id, p.person.name || "Untitled"]));
+  const users = Object.fromEntries(auth.allUsers().map((u) => [u.id, u.username]));
+  const head = ["time", "account", "biopic", "version", "level", "kind", "task_or_status", "model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd", "film_seconds", "render_seconds"];
+  const rows = usage.allEvents().filter((e) => !month || usage.monthOf(e.at) === month).map((e) => [
+    e.at, users[e.userId] || e.userId || "", names[e.projectId] || e.projectId || "", e.version || "", e.level, e.t === "ai" ? "ai" : "render",
+    e.t === "ai" ? e.task : e.status, e.model || "", e.in ?? "", e.out ?? "", e.cr ?? "", e.cw ?? "", e.t === "ai" ? usage.costOf(e).toFixed(6) : "", e.filmSeconds ?? "", e.wallSeconds ?? "",
+  ]);
+  res.attachment(`biopicker-usage-${month || "all"}.csv`);
+  res.type("text/csv").send([head, ...rows].map((r) => r.map(csvCell).join(",")).join("\n") + "\n");
+}));
 
 // ---------- project files ----------
 const FILE_DIRS = new Set(["uploads", "thumbs", "media", "output", "docs", "music"]);

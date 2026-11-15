@@ -227,3 +227,10 @@ dialog.bp .authform { margin: 6px 0 0; }
 .pw-wrap input { padding-right: 42px; }
 .pw-eye { all: unset; cursor: pointer; position: absolute; right: 8px; top: 50%; transform: translateY(-50%); font-size: 16px; line-height: 1; padding: 4px; border-radius: 6px; opacity: .8; }
 .pw-eye:hover, .pw-eye:focus-visible { opacity: 1; outline: 2px solid var(--gold); outline-offset: 1px; }
+
+/* plan & usage in Account settings */
+.plansum { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; }
+.plansum p { margin: 0; }
+.plancard { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.plancard p { margin: 0; }
+.plancard.current { border-color: var(--gold); }

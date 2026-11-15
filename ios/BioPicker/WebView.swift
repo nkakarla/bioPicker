@@ -22,6 +22,7 @@ struct WebView: UIViewRepresentable {
         config.mediaTypesRequiringUserActionForPlayback = [] // voice previews play after an async fetch
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
         config.defaultWebpagePreferences.preferredContentMode = .mobile
+        config.applicationNameForUserAgent = "Mobile/15E148 BioPickerApp/1.2" // lets the server tell the app from Safari
         config.userContentController.addScriptMessageHandler(NativeBridge.shared, contentWorld: .page, name: NativeBridge.handlerName)
 
         let web = WKWebView(frame: .zero, configuration: config)

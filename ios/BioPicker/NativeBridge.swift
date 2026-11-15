@@ -1,3 +1,4 @@
+import StoreKit
 import UIKit
 import UserNotifications
 import WebKit
@@ -47,12 +48,114 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply {
         case "signedIn":
             replyHandler(true, nil)
             registerIfAllowed()
+            deliverUnfinished()
         case "wantNotifications":
             replyHandler(true, nil)
             askForNotifications()
+        case "products":
+            let ids = (body["ids"] as? [String]) ?? []
+            Task {
+                do {
+                    // prices as the App Store shows them, in the person's currency
+                    var prices: [String: String] = [:]
+                    for p in try await Product.products(for: ids) { prices[p.id] = p.displayPrice }
+                    replyHandler(Self.json(prices), nil)
+                } catch {
+                    replyHandler(nil, error.localizedDescription)
+                }
+            }
+        case "buy":
+            guard let id = body["productId"] as? String, let tokenText = body["accountToken"] as? String,
+                  let token = UUID(uuidString: tokenText) else {
+                replyHandler(nil, "Bad purchase request")
+                return
+            }
+            Task { await buy(productId: id, accountToken: token, reply: replyHandler) }
+        case "finish":
+            // the server has recorded the purchase, so the App Store can stop re-delivering it
+            let id = UInt64((body["id"] as? String) ?? "") ?? 0
+            Task {
+                for await result in Transaction.unfinished {
+                    if case .verified(let t) = result, t.id == id { await t.finish() }
+                }
+                replyHandler(true, nil)
+            }
+        case "restore":
+            Task {
+                do {
+                    try await AppStore.sync()
+                    var list: [String] = []
+                    for await result in Transaction.currentEntitlements {
+                        if case .verified(let t) = result, t.productType == .autoRenewable { list.append(result.jwsRepresentation) }
+                    }
+                    replyHandler(Self.json(list), nil)
+                } catch {
+                    replyHandler(nil, error.localizedDescription)
+                }
+            }
         default:
             replyHandler(nil, "Unknown message \(type)")
         }
+    }
+
+    // MARK: In-App Purchase (StoreKit 2)
+    // The server checks Apple's signature on every transaction and sets the plan; the app only relays them.
+    // A transaction is finished only after the server has recorded it, so nothing is lost if the network drops.
+
+    private func buy(productId: String, accountToken: UUID, reply: @escaping (Any?, String?) -> Void) async {
+        do {
+            guard let product = try await Product.products(for: [productId]).first else {
+                reply(nil, "This plan isn't available in the App Store right now.")
+                return
+            }
+            switch try await product.purchase(options: [.appAccountToken(accountToken)]) {
+            case .success(let result):
+                guard case .verified(let t) = result else {
+                    reply(nil, "The App Store couldn't verify this purchase.")
+                    return
+                }
+                reply(Self.json(["jws": result.jwsRepresentation, "id": String(t.id)]), nil)
+            case .userCancelled, .pending: // pending: waiting for Ask to Buy approval; it arrives later via updates
+                reply(nil, nil)
+            @unknown default:
+                reply(nil, nil)
+            }
+        } catch {
+            reply(nil, error.localizedDescription)
+        }
+    }
+
+    private var updatesTask: Task<Void, Never>?
+    /// Renewals, refunds and purchases approved later arrive here, even while the app is closed.
+    func listenForTransactions() {
+        guard updatesTask == nil else { return }
+        updatesTask = Task { [weak self] in
+            for await result in Transaction.updates {
+                guard case .verified(let t) = result else { continue }
+                await self?.deliver(jws: result.jwsRepresentation, transaction: t)
+            }
+        }
+    }
+
+    /// Hands a transaction to the page, which sends it to the server; finished only when the server took it.
+    private func deliver(jws: String, transaction: Transaction) async {
+        guard pageReady, let web = webView else { return } // stays unfinished and comes back next launch
+        let ok = try? await web.callAsyncJavaScript("return window.bpNative && window.bpNative.applePurchase ? await window.bpNative.applePurchase(jws) : false",
+                                                    arguments: ["jws": jws], contentWorld: .page)
+        if (ok as? Bool) == true { await transaction.finish() }
+    }
+
+    private func deliverUnfinished() {
+        Task {
+            for await result in Transaction.unfinished {
+                if case .verified(let t) = result { await deliver(jws: result.jwsRepresentation, transaction: t) }
+            }
+        }
+    }
+
+    static func json(_ value: Any) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: value) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     // MARK: page → native helpers
@@ -131,6 +234,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply {
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        Task { @MainActor in NativeBridge.shared.listenForTransactions() }
         return true
     }
 

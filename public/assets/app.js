@@ -42,6 +42,8 @@ async function api(method, url, body, isForm) {
     showAuth("signin");
     throw new Error("Please sign in.");
   }
+  // a plan limit: offer the plans (when people can subscribe here) or the admin's upgrade link
+  if (r.status === 402 && data?.paywall && (data.plans || data.upgradeUrl)) limitDialog(data);
   if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
   return data;
 }
@@ -675,7 +677,7 @@ function authSignUp() {
     h("p", {}, "Your biopics, photos and films are private to your account unless you choose to share a film."),
     authForm(async (fd) => {
       if (fd.get("password") !== fd.get("password2")) throw new Error("The passwords don't match.");
-      const r = await api("POST", "api/auth/signup", { username: fd.get("username"), password: fd.get("password"), agree: fd.get("agree") === "on" });
+      const r = await api("POST", "api/auth/signup", { username: fd.get("username"), password: fd.get("password"), agree: fd.get("agree") === "on", ...arrival() });
       signedIn(r.user);
     },
       authInput("Username", "username", { autocomplete: "username", autocapitalize: "none", spellcheck: "false", placeholder: "3–32 letters or numbers", required: true }),
@@ -722,16 +724,179 @@ function renderAcct() {
   menu.append(
     h("summary", { class: "btn sm ghost", title: "Your account" }, `👤 ${ME.username} ▾`),
     h("div", { class: "pop" },
-      h("button", { onclick: () => { menu.open = false; accountDialog(); } }, h("b", {}, "Account settings"), h("span", {}, "Change password, delete account")),
+      h("button", { onclick: () => { menu.open = false; accountDialog(); } }, h("b", {}, "Account settings"), h("span", {}, "Your plan, change password, delete account")),
+      ME.admin ? h("button", { onclick: () => { menu.open = false; location.href = "admin.html"; } }, h("b", {}, "Admin panel"), h("span", {}, "Accounts, usage and cost, plans and paywall")) : null,
       h("button", { onclick: () => { menu.open = false; signOut(); } }, h("b", {}, "Sign out"), h("span", {}, "Sign out on this device"))));
   document.addEventListener("click", (e) => { if (!menu.contains(e.target)) menu.open = false; });
   fill(box, menu);
 }
 
+// where this visitor came from (the external page that linked here, and the first page they opened), sent with sign-up
+(() => {
+  try {
+    if (sessionStorage.getItem("bp_arrival")) return;
+    const ref = document.referrer && new URL(document.referrer).host !== location.host ? document.referrer : "";
+    sessionStorage.setItem("bp_arrival", JSON.stringify({ referrer: ref.slice(0, 300), landing: (location.pathname + location.search).slice(0, 300) }));
+  } catch {}
+})();
+function arrival() {
+  try {
+    return JSON.parse(sessionStorage.getItem("bp_arrival") || "{}");
+  } catch {
+    return {};
+  }
+}
+
+const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString([], { dateStyle: "medium" }) : "");
+/** One line about a paid subscription: how it's paid and when it renews or ends. */
+function subLine(sub) {
+  if (!sub) return null;
+  const how = sub.provider === "apple" ? "through the App Store" : "by card";
+  return sub.cancelAtPeriodEnd ? `Paid ${how}; ends ${fmtDate(sub.periodEnd)} (won't renew).` : `Paid ${how}; renews ${fmtDate(sub.periodEnd)}.`;
+}
+
+/** This month's plan allowance, as a short summary for Account settings. */
+function planSummary(u) {
+  if (!u) return null;
+  if (u.plan.id === "none") {
+    return h("div", { class: "card plansum" },
+      h("b", {}, "No plan yet"),
+      h("p", { class: "small muted" }, u.plans ? "BioPicker's free spots were full when you joined. Choose a plan to start making films." : "BioPicker's free spots were full when you joined. You'll be able to make films once you're given a plan."),
+      u.plans ? h("div", { class: "row" }, h("button", { class: "btn sm primary", onclick: () => plansDialog() }, "See plans")) : null);
+  }
+  const renders = u.renders.limit == null ? `${u.renders.used} film render${u.renders.used === 1 ? "" : "s"} this month (no limit)` : `${u.renders.used} of ${u.renders.limit} film renders used this month`;
+  const ai = u.aiShare == null ? null : `${Math.round(u.aiShare * 100)}% of this month's AI allowance used`;
+  return h("div", { class: "card plansum" },
+    h("div", { class: "row" }, h("b", {}, `Plan: ${u.plan.name}`), u.plan.priceMonthly ? h("span", { class: "muted small" }, ` $${u.plan.priceMonthly.toFixed(2)}/month`) : null),
+    u.plan.description ? h("p", { class: "small muted" }, u.plan.description) : null,
+    h("div", { class: "small" }, renders),
+    u.renders.limit ? h("div", { class: "progress", title: renders }, h("div", { style: `width:${Math.min(100, (100 * u.renders.used) / u.renders.limit)}%` })) : null,
+    ai ? h("div", { class: "small" }, ai) : null,
+    u.aiShare != null ? h("div", { class: "progress", title: ai }, h("div", { style: `width:${Math.round(u.aiShare * 100)}%` })) : null,
+    u.series ? null : h("div", { class: "small muted" }, "Documentary series aren't included in this plan."),
+    u.sub ? h("div", { class: "small muted" }, subLine(u.sub)) : null,
+    u.plans ? h("div", { class: "row" }, h("button", { class: "btn sm primary", onclick: () => plansDialog() }, u.sub ? "Change or cancel plan" : "See plans"))
+      : u.upgrade?.url ? h("div", { class: "row" }, h("a", { class: "btn sm primary", href: u.upgrade.url, target: "_blank", rel: "noopener" }, "Upgrade")) : null);
+}
+
+// ---------- paid plans: Stripe on the web, Apple In-App Purchase in the iPhone app ----------
+const inApp = () => !!native;
+async function plansDialog(reason) {
+  let info;
+  try {
+    info = await api("GET", "api/pay/plans");
+  } catch (e) {
+    return toast(e.message, true);
+  }
+  // in the app, prices come from the App Store (in the person's currency); on the web, from the plan
+  let storePrices = {};
+  const appleIds = info.plans.map((p) => p.appleProductId).filter(Boolean);
+  if (inApp() && appleIds.length) {
+    try {
+      storePrices = JSON.parse((await native({ type: "products", ids: appleIds })) || "{}");
+    } catch {}
+  }
+  const sub = info.sub?.active ? info.sub : null;
+  const buyable = (p) => (inApp() ? !!(p.appleProductId && storePrices[p.appleProductId]) : p.web);
+  const price = (p) => (p.free ? "Free" : inApp() && storePrices[p.appleProductId] ? `${storePrices[p.appleProductId]} / month` : `${Number(p.priceMonthly).toFixed(2)} / month`);
+  const features = (p) => [
+    p.rendersPerMonth == null ? "Unlimited film renders" : `${p.rendersPerMonth} film render${p.rendersPerMonth === 1 ? "" : "s"} a month`,
+    p.series ? "Documentary series" : null,
+  ].filter(Boolean).join(" · ");
+  const choose = async (p, btn) => {
+    btn.disabled = true;
+    try {
+      if (inApp()) await buyInApp(p);
+      else {
+        const r = await api("POST", "api/pay/stripe/checkout", { planId: p.id });
+        location.href = r.url;
+        return;
+      }
+      d.close();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  // someone paying on one platform manages it there
+  const elsewhere = sub && ((inApp() && sub.provider === "stripe") || (!inApp() && sub.provider === "apple"));
+  const cards = info.plans.map((p) => {
+    const current = info.current.planId === p.id;
+    let action = null;
+    if (current) action = h("span", { class: "tag ok" }, "Your plan");
+    else if (!p.free && buyable(p) && !elsewhere) {
+      const btn = h("button", { class: "btn sm primary", onclick: () => choose(p, btn) }, sub ? "Switch" : "Choose");
+      action = btn;
+    }
+    return h("div", { class: `card plancard${current ? " current" : ""}` },
+      h("div", { class: "row" }, h("b", {}, p.name), h("span", { class: "spacer" }), h("span", {}, price(p))),
+      p.description ? h("p", { class: "small muted" }, p.description) : null,
+      h("div", { class: "row" }, h("span", { class: "small" }, features(p)), h("span", { class: "spacer" }), action));
+  });
+  // in the app with nothing for sale on the App Store (no product ids yet, or an older app build): say so plainly.
+  // No pointer to the website here: App Review rule 3.1.1 limits steering people to outside purchases.
+  const appSale = !inApp() || info.plans.some((p) => !p.free && buyable(p));
+  const manage = sub ? (
+    elsewhere
+      ? h("p", { class: "small muted" }, sub.provider === "apple" ? "You subscribe through the App Store. Change or cancel it in the BioPicker iPhone app, or in Settings › your name › Subscriptions." : "You subscribe on the BioPicker website. Sign in there in a web browser to change or cancel.")
+      : inApp()
+        ? h("p", { class: "small" }, h("a", { href: "https://apps.apple.com/account/subscriptions", target: "_blank" }, "Manage or cancel in your App Store subscriptions"))
+        : h("p", { class: "small" }, h("a", { href: "#", onclick: async (e) => { e.preventDefault(); try { location.href = (await api("POST", "api/pay/stripe/portal")).url; } catch (x) { toast(x.message, true); } } }, "Manage, change card or cancel"))
+  ) : null;
+  const d = showDialog(reason ? "You've reached a plan limit" : "Plans",
+    reason ? h("p", {}, reason) : null,
+    sub ? h("p", { class: "small muted" }, subLine(sub)) : null,
+    ...cards,
+    manage,
+    !appSale ? h("p", { class: "small muted" }, "Paid plans can't be bought in the iPhone app yet.")
+    : inApp() ? h("p", { class: "small muted" }, "Subscriptions renew monthly until cancelled, and are charged to your Apple ID. Cancel any time in your App Store subscriptions, at least 24 hours before the renewal date. ",
+      h("a", { href: "terms.html", target: "_blank" }, "Terms"), " · ", h("a", { href: "privacy.html", target: "_blank" }, "Privacy")) : h("p", { class: "small muted" }, "Plans renew monthly until cancelled. Payments are handled by Stripe; BioPicker never sees your card. ", h("a", { href: "terms.html", target: "_blank" }, "Terms")),
+    h("div", { class: "row end" },
+      inApp() && appSale ? h("button", { class: "btn", onclick: () => restoreInApp() }, "Restore purchases") : null,
+      h("button", { class: "btn", onclick: () => d.close() }, "Close")));
+}
+
+/** iPhone: buy through StoreKit; the app returns Apple's signed transaction and the server checks it. */
+async function buyInApp(p) {
+  const { accountToken } = await api("GET", "api/pay/apple/token");
+  const res = await native({ type: "buy", productId: p.appleProductId, accountToken });
+  if (!res) return; // cancelled, or waiting for approval (Ask to Buy): it arrives later through bpNative.applePurchase
+  const { jws, id } = JSON.parse(res);
+  const r = await api("POST", "api/pay/apple/purchase", { transaction: jws });
+  native({ type: "finish", id }).catch(() => {}); // recorded: the App Store can stop re-sending it
+  toast(`You're on ${r.plan.name}. Thank you!`);
+  renderAcct();
+}
+async function restoreInApp() {
+  try {
+    const list = JSON.parse((await native({ type: "restore" })) || "[]");
+    if (!list.length) return toast("No App Store subscriptions to restore on this Apple ID.");
+    const r = await api("POST", "api/pay/apple/purchase", { transactions: list });
+    toast(`Restored. You're on ${r.plan.name}.`);
+    document.querySelector("dialog.bp")?.close();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/** Shown when a plan limit stops something: the plans to choose from, or the admin's upgrade link. */
+function limitDialog(data) {
+  if (data.plans) return plansDialog(data.error);
+  const d = showDialog("You've reached a plan limit",
+    h("p", {}, data.error),
+    h("div", { class: "row end" },
+      h("button", { class: "btn", onclick: () => d.close() }, "Not now"),
+      h("a", { class: "btn primary", href: data.upgradeUrl, target: "_blank", rel: "noopener", onclick: () => d.close() }, "See plans")));
+}
+
 async function accountDialog() {
   try { ME = (await api("GET", "api/auth/me")).user || ME; } catch {}
+  let mine = null;
+  try { mine = await api("GET", "api/account/usage"); } catch {}
   const d = showDialog("Account",
     h("p", {}, "Signed in as ", h("b", {}, ME.username), h("span", { class: "muted small" }, ` · member since ${new Date(ME.createdAt).toLocaleDateString([], { dateStyle: "medium" })}`)),
+    planSummary(mine),
     h("div", { class: "acctacts" },
       h("button", { class: "btn", onclick: () => reauthDialog("Change password", "Choose a new password. You'll stay signed in here; other devices are signed out.", [["New password", "newPassword", "password", "new-password"], ["Confirm new password", "newPassword2", "password", "new-password"]], async (body) => {
         if (body.newPassword !== body.newPassword2) throw new Error("The passwords don't match.");
@@ -801,6 +966,16 @@ window.bpNative = {
   async registerDevice(token, environment) {
     window.bpNative.deviceToken = token;
     if (ME) await api("POST", "api/account/devices", { token, environment }).catch(() => {});
+  },
+  // renewals and purchases finished outside the dialog (e.g. approved by a parent later) arrive here
+  async applePurchase(jws) {
+    if (!ME) return false;
+    try {
+      await api("POST", "api/pay/apple/purchase", { transaction: jws });
+      return true;
+    } catch {
+      return false;
+    }
   },
 };
 
@@ -1435,5 +1610,11 @@ api("GET", "api/health").then((x) => (health = x)).catch(() => {}).finally(async
   if (!ME) return showAuth("signin");
   renderAcct();
   native?.({ type: "signedIn" });
+  // back from Stripe Checkout
+  const paid = new URLSearchParams(location.search).get("paid");
+  if (paid) {
+    history.replaceState(null, "", location.pathname + location.hash);
+    toast(paid === "1" ? "Thank you! Your plan updates as soon as the payment is confirmed (usually a few seconds)." : "No payment was made.");
+  }
   route();
 });
