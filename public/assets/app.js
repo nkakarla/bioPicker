@@ -694,7 +694,7 @@ function authSignUp() {
 function authRecover() {
   return [
     h("h1", {}, "Forgot your password?"),
-    h("p", {}, "Ask the person who runs this BioPicker to set a new password for you. Your biopics stay exactly as they are. Then sign in with the new password and change it under Account settings."),
+    h("p", {}, "Email ", h("a", { href: "mailto:support@eperf.com?subject=BioPicker%20password" }, "support@eperf.com"), " with your username and we will help you get back in. Your biopics stay exactly as they are. Once you are signed in with a new password, change it under Account settings."),
     authLinks(linkTo("Back to sign in", "signin")),
   ];
 }

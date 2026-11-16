@@ -1,6 +1,6 @@
 {
   "name": "biopicker",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "BioPicker - AI biopic video maker. Copyright (c) 2026 EPerf",
   "type": "module",
   "main": "server.js",
