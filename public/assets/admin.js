@@ -244,7 +244,7 @@ function smallTable(columns, rows, { sort } = {}) {
 // ============================================================================
 // pages
 // ============================================================================
-const TABS = [["overview", "Usage & cost"], ["accounts", "Accounts"], ["plans", "Plans & paywall"]];
+const TABS = [["overview", "Usage & cost"], ["accounts", "Accounts"], ["biopics", "Biopics"], ["plans", "Plans & paywall"]];
 let months = [];
 const cache = new Map();
 async function load(url) {
@@ -254,13 +254,13 @@ async function load(url) {
 const refresh = () => { cache.clear(); route(); };
 
 function header(tab) {
-  fill($("#tabs"), ...TABS.map(([id, label]) => h("button", { class: tab === id || (tab === "account" && id === "accounts") ? "on" : "", onclick: () => go({ tab: id, id: null }) }, label)));
+  fill($("#tabs"), ...TABS.map(([id, label]) => h("button", { class: tab === id || (tab === "account" && id === "accounts") || (tab === "biopic" && id === "biopics") ? "on" : "", onclick: () => go({ tab: id, id: null }) }, label)));
   const sel = $("#month");
   const cur = qs().get("month") || "";
   const options = [["", `This month`], ...months.filter((m) => m !== thisMonthKey()).map((m) => [m, monthName(m)]), ["all", "All time"]];
   fill(sel, ...options.map(([v, l]) => h("option", { value: v, selected: v === cur ? true : null }, l)));
   sel.onchange = () => go({ month: sel.value });
-  sel.closest("label").style.visibility = tab === "plans" || tab === "account" ? "hidden" : "";
+  sel.closest("label").style.visibility = ["plans", "account", "biopics", "biopic"].includes(tab) ? "hidden" : "";
 }
 const thisMonthKey = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
 const monthQ = () => { const m = qs().get("month"); return m ? `month=${encodeURIComponent(m)}` : ""; };
@@ -291,6 +291,8 @@ async function route() {
   try {
     if (tab === "accounts") await pageAccounts();
     else if (tab === "account") await pageAccount(q.get("id"));
+    else if (tab === "biopics") await pageBiopics();
+    else if (tab === "biopic") await pageBiopic(q.get("id"));
     else if (tab === "plans") await pagePlans();
     else await pageOverview();
   } catch (e) {
@@ -640,12 +642,84 @@ async function pageAccount(id) {
     a.logins.length ? smallTable(loginCols, a.logins, { sort: "at" }) : null,
     h("div", { class: "card" }, pwForm),
     h("h2", {}, "Biopics"),
-    eperfTable({ id: "b", noun: "biopics", columns: biopicCols, rows: a.biopics, sort: "aiCost", dir: "desc", csv: `biopicker-${acc.username}-biopics`, emptyAll: "This account has no biopics." }),
+    eperfTable({ id: "b", noun: "biopics", columns: biopicCols, rows: a.biopics, sort: "aiCost", dir: "desc", csv: `biopicker-${acc.username}-biopics`, emptyAll: "This account has no biopics.", onRow: (r) => go({ tab: "biopic", id: r.id }) }),
     h("h2", {}, "By month"),
     smallTable([{ key: "key", label: "Month", text: (r) => monthName(r.key) }, ...levelCols.slice(1)], a.byMonth, { sort: "key" }),
     h("h2", {}, "Activity"),
     h("p", { class: "small muted" }, "The latest 500 AI calls and renders. “Export usage CSV” on Usage & cost has everything."),
     eperfTable({ id: "e", noun: "events", columns: eventCols, rows: a.events, sort: "at", dir: "desc", csv: `biopicker-${acc.username}-activity`, emptyAll: "No AI calls or renders recorded for this account yet." }));
+}
+
+// ---------- what people are making ----------
+const biopicListCols = [
+  { key: "name", label: "Biopic" },
+  { key: "owner", label: "Account" },
+  { key: "status", label: "Status" },
+  { key: "reports", label: "Reports", num: true, text: (r) => (r.reports ? `⚠ ${r.reports}` : "") },
+  { key: "occupation", label: "Known for", text: (r) => (r.occupation.length > 40 ? r.occupation.slice(0, 40) + "…" : r.occupation) },
+  { key: "lived", label: "Lived", value: (r) => r.born, text: (r) => [r.born, r.died].filter(Boolean).join(" – ") },
+  { key: "tone", label: "Tone" },
+  { key: "language", label: "Language" },
+  { key: "photos", label: "Photos", num: true },
+  { key: "documents", label: "Documents", num: true },
+  { key: "films", label: "Films", num: true },
+  { key: "filmMinutes", label: "Film minutes", num: true, text: (r) => mins(r.filmMinutes) },
+  { key: "aiCost", label: "AI cost", num: true, text: (r) => money(r.aiCost) },
+  { key: "lastFilmAt", label: "Last film", text: (r) => when(r.lastFilmAt), value: (r) => r.lastFilmAt || "" },
+  { key: "createdAt", label: "Started", text: (r) => day(r.createdAt), value: (r) => r.createdAt || "" },
+  { key: "updatedAt", label: "Last edited", text: (r) => when(r.updatedAt), value: (r) => r.updatedAt || "" },
+];
+async function pageBiopics() {
+  const rows = await load("api/admin/biopics");
+  header("biopics");
+  const withFilms = rows.filter((r) => r.films).length;
+  fill(main,
+    h("div", { class: "row" }, h("h1", {}, "Biopics"), h("span", { class: "spacer" }), h("button", { class: "btn sm ghost", onclick: refresh }, "Refresh")),
+    h("p", { class: "lead" }, `Every biopic on this server, private ones included: ${rows.length} in all, ${withFilms} with films. Click one to see its story and watch its films. Opening a biopic is logged.`),
+    h("div", { class: "tiles" },
+      tile("Biopics", int(rows.length), `${rows.filter((r) => r.status === "Public").length} public`),
+      tile("Films", int(rows.reduce((n, r) => n + r.films, 0)), `${mins(rows.reduce((n, r) => n + r.filmMinutes, 0))} in all`),
+      tile("Reported", int(rows.filter((r) => r.reports).length), "public biopics people reported", rows.some((r) => r.reports))),
+    eperfTable({ id: "bp", noun: "biopics", columns: biopicListCols, rows, sort: "updatedAt", dir: "desc", csv: "biopicker-biopics", emptyAll: "No one has started a biopic yet.", onRow: (r) => go({ tab: "biopic", id: r.id }) }));
+}
+
+async function pageBiopic(id) {
+  const b = await load(`api/admin/biopics/${encodeURIComponent(id)}`);
+  header("biopic");
+  const file = (dir, f) => `files/${encodeURIComponent(b.id)}/${dir}/${encodeURIComponent(f)}`;
+  const P = b.person;
+  const facts = [["Goes by", P.preferredName], ["Born", [P.born, P.birthplace].filter(Boolean).join(", ")], ["Died", P.died], ["Nationality", P.nationality], ["Known for", P.occupation], ["Claim to fame", P.claimToFame], ["Personality", P.personality], ["Family", P.family], ["Legacy", P.legacy], ["Notes", P.notes], ["Language", P.language], ["Tone", b.settings.tone]].filter(([, v]) => v);
+  const section = (title, count, ...kids) => h("details", { class: "card bp-sec", open: count ? true : null }, h("summary", {}, h("b", {}, title), h("span", { class: "muted small" }, ` ${count}`)), ...kids);
+  fill(main,
+    h("p", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); go({ tab: "biopics", id: null }); } }, "‹ All biopics")),
+    h("div", { class: "row" }, h("h1", {}, P.name || "Untitled"), h("span", { class: b.status === "Public" ? "tag ok" : "tag" }, b.status)),
+    h("p", { class: "lead" },
+      "By ", b.owner ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); go({ tab: "account", id: b.owner.id }); } }, b.owner.username) : "(no account)",
+      ` · started ${day(b.createdAt)} · last edited ${when(b.updatedAt)}${b.publishedAt && b.status === "Public" ? ` · public since ${day(b.publishedAt)}` : ""}`),
+    b.reports.length ? h("div", { class: "alertbar warn", role: "alert" }, h("span", { class: "ai", "aria-hidden": "true" }, "⚠"),
+      h("div", {}, h("b", {}, `Reported ${b.reports.length} time${b.reports.length > 1 ? "s" : ""}`),
+        ...b.reports.map((r) => h("div", { class: "small" }, `${when(r.at)}${r.by ? ` by ${r.by}` : ""}: ${r.reason || "(no reason given)"}`)))) : null,
+    h("h2", {}, "Films"),
+    b.films.length ? h("div", { class: "bp-films" }, ...b.films.map((f) => h("div", { class: "card bp-film" },
+      h("video", { controls: true, preload: "metadata", playsinline: true, src: file("output", f.file) },
+        f.vtt ? h("track", { kind: "captions", src: file("output", f.vtt), srclang: P.language || "en", label: "Captions" }) : null),
+      h("div", {}, h("b", {}, f.title || f.label), h("span", { class: "muted small" }, ` · ${f.label}`)),
+      h("div", { class: "small muted" }, `${Math.round(f.seconds / 60 * 10) / 10} min · ${when(f.at)}${f.quality ? ` · ${f.quality}` : ""}${f.kept ? " · kept" : ""}`))))
+      : h("div", { class: "state" }, "No films rendered yet."),
+    h("h2", {}, "About the person"),
+    facts.length ? h("div", { class: "card" }, h("dl", { class: "bp-facts" }, ...facts.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]))) : h("div", { class: "state" }, "Nothing filled in yet."),
+    section("Scripts", b.scripts.length, ...b.scripts.map((s) => h("div", { class: "bp-script" },
+      h("h3", {}, `${s.label}: ${s.title || "untitled"}`), s.tagline ? h("p", { class: "muted" }, s.tagline) : null,
+      h("ol", {}, ...s.scenes.map((sc) => h("li", {}, (sc.year || sc.place || sc.title) ? h("b", {}, [sc.year, sc.place, sc.title].filter(Boolean).join(" · ") + " — ") : null, sc.narration)))))),
+    section("Photos", b.photoCount, b.photos.length ? h("div", { class: "bp-photos" }, ...b.photos.map((ph) => h("figure", { class: ph.include ? "" : "off", title: ph.include ? "" : "left out of the films" },
+      h("img", { src: file("thumbs", ph.file), alt: ph.caption || "", loading: "lazy" }),
+      h("figcaption", { class: "small" }, [ph.date, ph.place, ph.caption].filter(Boolean).join(" · "))))) : null,
+      b.photoCount > b.photos.length ? h("p", { class: "small muted" }, `Showing the first ${b.photos.length} of ${b.photoCount}.`) : null),
+    section("Interview answers", b.interview.length, ...b.interview.map((q) => h("div", { class: "bp-qa" }, h("div", { class: "small muted" }, q.question), h("div", {}, q.answer)))),
+    section("Timeline", b.timeline.length, b.timeline.length ? smallTable([
+      { key: "date", label: "Date" }, { key: "title", label: "Event" }, { key: "place", label: "Place" }, { key: "description", label: "Details", text: (r) => (r.description.length > 160 ? r.description.slice(0, 160) + "…" : r.description) },
+    ], b.timeline, { sort: "date" }) : null),
+    section("Documents", b.documents.length, ...b.documents.map((d) => h("div", { class: "bp-qa" }, h("b", {}, d.name || "Document"), d.summary ? h("div", { class: "small" }, d.summary) : null))));
 }
 
 async function pagePlans() {

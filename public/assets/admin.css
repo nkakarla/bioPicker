@@ -101,3 +101,23 @@ table.et.edit td.center { text-align: center; }
 .alertbar a { white-space: nowrap; }
 .tile.warn { border-color: #b8862f; background: rgba(214, 150, 40, .1); }
 @media (max-width: 860px) { .adm-alerts { padding: 0 16px; } }
+
+/* a biopic: films, facts, scripts, photos */
+.bp-films { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.bp-film video { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 8px; margin-bottom: 6px; }
+.bp-facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font-size: 14px; }
+.bp-facts dt { color: var(--muted); }
+.bp-facts dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.adm details.bp-sec { margin-top: 14px; }
+.adm details.bp-sec > summary { cursor: pointer; font-size: 16px; }
+.bp-script h3 { margin: 14px 0 4px; font-size: 16px; }
+.bp-script ol { padding-left: 22px; font-size: 14px; line-height: 1.5; }
+.bp-script li { margin-bottom: 6px; }
+.bp-photos { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin-top: 10px; }
+.bp-photos figure { margin: 0; }
+.bp-photos figure.off { opacity: .45; }
+.bp-photos img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; background: var(--panel2); }
+.bp-photos figcaption { color: var(--muted); margin-top: 3px; overflow-wrap: anywhere; }
+.bp-qa { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bp-qa:last-child { border-bottom: 0; }
+@media (max-width: 860px) { .bp-films { grid-template-columns: 1fr; } .bp-facts { grid-template-columns: 1fr; } .bp-facts dd { margin-bottom: 6px; } }

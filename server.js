@@ -1047,6 +1047,89 @@ app.patch("/api/admin/accounts/:uid", wrap(async (req, res) => {
   auth.updateUser(u);
   res.json({ ok: true });
 }));
+// ---------- admin: what people are making (every biopic, private ones too; see the Privacy Policy) ----------
+const ADMIN_VIEWS_FILE = path.join(DATA_DIR, "admin-views.jsonl");
+function reportsByProject() {
+  const out = {};
+  try {
+    for (const line of fs.readFileSync(REPORTS_FILE, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      const r = JSON.parse(line);
+      (out[r.projectId] ||= []).push({ at: r.at, reason: r.reason, by: r.by || null });
+    }
+  } catch {}
+  return out;
+}
+/** Every film a biopic has: the kept ones and the latest render of each version, newest first. */
+function filmsOf(p) {
+  const seen = new Set();
+  return [...p.films, ...Object.values(p.renders || {})]
+    .filter((f) => f?.file && !seen.has(f.file) && seen.add(f.file))
+    .map((f) => ({ version: f.version, label: versionLabel(f.version), title: f.title || p.scripts[f.version]?.title || "", file: f.file, vtt: f.vtt || null, seconds: f.seconds || 0, at: f.at || null, quality: f.quality || "", kept: p.films.some((k) => k.file === f.file) }))
+    .sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+}
+app.get("/api/admin/biopics", wrap(async (req, res) => {
+  const users = Object.fromEntries(auth.allUsers().map((u) => [u.id, u.username]));
+  const reports = reportsByProject();
+  const cost = {};
+  for (const e of usage.allEvents()) if (e.projectId) cost[e.projectId] = (cost[e.projectId] || 0) + usage.costOf(e);
+  res.json(allProjects().map((p) => {
+    const films = filmsOf(p);
+    return {
+      id: p.id,
+      name: p.person.name || "Untitled",
+      owner: users[p.ownerId] || "(no account)",
+      ownerId: p.ownerId || null,
+      occupation: p.person.occupation || "",
+      born: p.person.born || "",
+      died: p.person.died || "",
+      language: p.person.language || "",
+      tone: p.settings?.tone || "",
+      photos: p.photos.length,
+      documents: p.documents.length,
+      films: films.length,
+      filmMinutes: films.reduce((n, f) => n + f.seconds, 0) / 60,
+      lastFilmAt: films[0]?.at || null,
+      status: p.archivedAt ? "Archived" : p.public ? "Public" : "Private",
+      reports: (reports[p.id] || []).length,
+      aiCost: cost[p.id] || 0,
+      createdAt: p.createdAt,
+      updatedAt: p.updatedAt,
+    };
+  }));
+}));
+app.get("/api/admin/biopics/:id", wrap(async (req, res) => {
+  let p;
+  try {
+    p = loadProject(req.params.id);
+  } catch {
+    throw notFound();
+  }
+  // each look at someone's biopic is written down (who, when, whose)
+  fs.appendFileSync(ADMIN_VIEWS_FILE, JSON.stringify({ at: new Date().toISOString(), admin: req.user.username, projectId: p.id, ownerId: p.ownerId || null }) + "\n");
+  const owner = p.ownerId ? auth.getUser(p.ownerId) : null;
+  const clip = (s, n = 4000) => String(s || "").slice(0, n);
+  const placeName = (pl) => (typeof pl === "string" ? pl : pl?.name || pl?.display || [pl?.city, pl?.country].filter(Boolean).join(", ") || "");
+  res.json({
+    id: p.id,
+    owner: owner ? { id: owner.id, username: owner.username } : null,
+    createdAt: p.createdAt,
+    updatedAt: p.updatedAt,
+    status: p.archivedAt ? "Archived" : p.public ? "Public" : "Private",
+    publishedAt: p.publishedAt || null,
+    person: Object.fromEntries(Object.entries(p.person).map(([k, v]) => [k, clip(v, 2000)])),
+    settings: { tone: p.settings?.tone || "", quality: p.settings?.quality || "", music: p.settings?.music || "" },
+    films: filmsOf(p),
+    scripts: Object.entries(p.scripts || {}).map(([version, s]) => ({ version, label: versionLabel(version), title: s.title || "", tagline: s.tagline || "", scenes: (s.scenes || []).map((sc) => ({ year: sc.year || "", place: placeName(sc.place), title: sc.onScreenTitle || "", narration: clip(sc.narration, 2000) })) })),
+    photos: p.photos.slice(0, 200).map((ph) => ({ file: ph.file, caption: clip(ph.caption, 300), date: ph.date || "", place: placeName(ph.place), include: ph.include !== false })),
+    photoCount: p.photos.length,
+    documents: p.documents.map((d) => ({ name: d.name || "", summary: clip(d.summary, 1000) })),
+    timeline: p.timeline.slice(0, 300).map((t) => ({ date: t.date || "", title: clip(t.title, 300), place: placeName(t.place), description: clip(t.description, 1000) })),
+    interview: p.interview.filter((q) => q.answer).map((q) => ({ question: clip(q.question, 500), answer: clip(q.answer) })),
+    reports: reportsByProject()[p.id] || [],
+  });
+}));
+
 // end a web subscription now and refund part of this month's payment (the admin chooses the amount)
 app.get("/api/admin/accounts/:uid/refund", wrap(async (req, res) => res.json(await pay.refundQuote(accountUser(req.params.uid)))));
 app.post("/api/admin/accounts/:uid/refund", wrap(async (req, res) => {
@@ -1114,8 +1197,9 @@ app.get("/files/:id/:dir/:file", (req, res) => {
   let f;
   try {
     const p = loadProject(id);
-    // owners see everything; anyone may see a public biopic's films and photo thumbnails
-    if (!owns(req, p) && !(p.public && PUBLIC_DIRS.has(dir))) return res.status(404).end();
+    // owners see everything; anyone may see a public biopic's films and photo thumbnails; admins may see any biopic's
+    // films and thumbnails to review what is being made
+    if (!owns(req, p) && !((p.public || usage.isAdmin(req.user)) && PUBLIC_DIRS.has(dir))) return res.status(404).end();
     f = projectPath(id, dir, file);
   } catch {
     return res.status(404).end();
