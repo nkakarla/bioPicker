@@ -127,13 +127,16 @@ video { width: 100%; border-radius: 10px; background: #000; border: 1px solid va
 .hero { text-align: center; padding: 60px 20px; }
 .hero h1 { font-size: 44px; }
 .hero p { color: var(--muted); max-width: 640px; margin: 10px auto 26px; font-size: 17px; }
+.hero p.rules-note { font-size: 13px; margin: 12px auto 0; }
+p.rules-note { margin: 10px 2px 0; }
+.notice.held { margin-top: 12px; padding: 10px 14px; border: 1px solid #b8862f; border-radius: 10px; background: rgba(214, 150, 40, .12); font-size: 14px; line-height: 1.5; }
 .recent { max-width: 520px; margin: 30px auto 0; text-align: left; }
 .recent a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px; text-decoration: none; color: var(--text); background: var(--panel); }
 
 .foot { text-align: center; color: #7d705b; font-size: 12px; padding: 16px; border-top: 1px solid var(--line); }
 
 @media (max-width: 860px) {
-  .shell { grid-template-columns: 1fr; }
+  .shell { grid-template-columns: minmax(0, 1fr); } /* never wider than the screen, whatever is inside */
   .steps { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px; }
   .steps button { white-space: nowrap; }
   main { padding: 18px 16px 50px; }

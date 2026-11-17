@@ -382,7 +382,7 @@ async function watchJob(job, { onDone } = {}) {
     updateJobUI(j);
     if (j.status === "done" || j.status === "error") {
       watching.delete(job.id);
-      if (j.status === "error") toast(`${j.label}: ${j.error}`, true);
+      if (j.status === "error") toast(j.held ? "Your film is waiting for a review before it's made. See the Render step." : `${j.label}: ${j.error}`, !j.held);
       else toast(`${j.label} — done`);
       await reload();
       onDone?.(j);
@@ -494,6 +494,7 @@ function renderHome() {
       h("div", { class: "row", style: "justify-content:center" },
         h("input", { id: "newName", placeholder: "Whose story? e.g. Grandma Rose Alvarez", style: "max-width:340px" }),
         h("button", { class: "btn primary", onclick: newProject }, "Start a biopic")),
+      h("p", { class: "small muted rules-note" }, "Biopics are for honouring real lives. Please follow our ", h("a", { href: "terms.html#rules", target: "_blank" }, "content rules"), ": nothing sexual, hateful, violent or meant to hurt someone."),
       h("div", { class: "recent", id: "projList" }, h("p", { class: "muted small" }, "Loading your saved biopics…")),
       h("div", { class: "restore" },
         h("label", { class: "btn sm ghost" }, "Restore a backup (.zip)…",
@@ -1078,6 +1079,7 @@ function vMedia() {
       dropZone(native ? "📷  Tap to choose photos — their dates and places come along" : "📷  Drop photos here or click to choose (JPEG, PNG, WebP, HEIC)", "image/*", true, (f) => uploadFiles(`api/projects/${P.id}/photos`, "photos", f).catch((e) => toast(e.message, true)), "photoInput", native ? pickPhotosNative : null),
       dropZone("📄  Drop documents here (PDF, image scans, .txt)", ".pdf,.txt,.md,.csv,.json,.html,image/*", true, (f) => uploadFiles(`api/projects/${P.id}/documents`, "docs", f).catch((e) => toast(e.message, true)), "docInput"),
     ),
+    h("p", { class: "small muted rules-note" }, "Only add photos and documents you have the right to use. No sexual, hateful, violent or harassing material; every film is checked against our ", h("a", { href: "terms.html#rules", target: "_blank" }, "content rules"), " before it's made."),
     P.documents.length
       ? h("div", { class: "card", style: "margin-top:16px" },
           h("h2", {}, "Documents"),
@@ -1553,6 +1555,14 @@ function vRender() {
         s ? h("button", { class: "btn", onclick: () => { scriptTab = v; go("script"); } }, "✎ Edit script") : null,
         s ? h("button", { class: "btn primary", disabled: !!q, onclick: () => startRender(v) }, q ? (q.status === "queued" ? "Queued…" : "Rendering…") : films.length ? `Render v${films[0].n + 1}` : "Render")
           : h("button", { class: "btn", onclick: () => { scriptTab = v; go("script"); } }, "Write this script first")),
+      P.held?.[v] && !q
+        ? h("div", { class: "notice held", role: "status" },
+            h("b", {}, "⏸ Waiting for a review. "),
+            `This film may break our `, h("a", { href: "terms.html#rules", target: "_blank" }, "content rules"),
+            P.held[v].reason ? `: ${P.held[v].reason} ` : ". ",
+            "Someone at EPerf will look at it soon, and if it's fine you can render it. It didn't use up a render. If you change the script, rendering checks it again. Questions: ",
+            h("a", { href: "mailto:support@eperf.com" }, "support@eperf.com"), ".")
+        : null,
       cur
         ? h("div", { style: "margin-top:12px" },
             h("video", { controls: true, preload: "metadata", src: fileUrl("output", cur.file) + `?t=${encodeURIComponent(cur.at)}` },

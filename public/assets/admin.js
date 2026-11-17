@@ -46,7 +46,7 @@ const mins = (v) => (v ? `${v.toFixed(1)} min` : "0");
 const when = (iso) => (iso ? new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "");
 const day = (iso) => (iso ? new Date(iso).toLocaleDateString([], { dateStyle: "medium" }) : "");
 const LEVEL_NAMES = { short: "Short film", long: "Long film", episode: "Series episode", setup: "Biopic setup (photos, docs, interview, history, voice, series plan)" };
-const TASK_NAMES = { photo: "Photo analysis", document: "Document reading", interview: "Interview questions", history: "Historical research", voice: "Voice casting", series: "Series planning", script: "Script writing", tighten: "Script tightening", media: "Archival media picking", other: "Other" };
+const TASK_NAMES = { photo: "Photo analysis", document: "Document reading", interview: "Interview questions", history: "Historical research", voice: "Voice casting", series: "Series planning", script: "Script writing", tighten: "Script tightening", media: "Archival media picking", safety: "Content check", other: "Other" };
 const monthName = (m) => (m === "all" ? "All time" : new Date(`${m}-15`).toLocaleDateString([], { month: "long", year: "numeric" }));
 
 // ---------- URL state ----------
@@ -274,7 +274,7 @@ async function drawAlerts() {
     const { alerts } = await load("api/admin/alerts");
     fill(bar, ...alerts.map((a) => h("div", { class: `alertbar ${a.level}`, role: "alert" },
       h("span", { class: "ai", "aria-hidden": "true" }, "⚠"), h("span", {}, a.text), h("span", { class: "spacer" }),
-      a.tab && qs().get("tab") !== a.tab ? h("a", { href: `?tab=${a.tab}`, onclick: (e) => { e.preventDefault(); go({ tab: a.tab, id: null }); } }, "Sign-up settings") : null)));
+      a.tab && qs().get("tab") !== a.tab ? h("a", { href: `?tab=${a.tab}`, onclick: (e) => { e.preventDefault(); go({ tab: a.tab, id: null }); } }, a.tab === "biopics" ? "Review" : "Sign-up settings") : null)));
   } catch {
     fill(bar);
   }
@@ -656,6 +656,7 @@ const biopicListCols = [
   { key: "owner", label: "Account" },
   { key: "status", label: "Status" },
   { key: "reports", label: "Reports", num: true, text: (r) => (r.reports ? `⚠ ${r.reports}` : "") },
+  { key: "check", label: "Content check", text: (r) => (r.check === "Held" ? `⚠ Held${r.held > 1 ? ` (${r.held})` : ""}` : r.check) },
   { key: "occupation", label: "Known for", text: (r) => (r.occupation.length > 40 ? r.occupation.slice(0, 40) + "…" : r.occupation) },
   { key: "lived", label: "Lived", value: (r) => r.born, text: (r) => [r.born, r.died].filter(Boolean).join(" – ") },
   { key: "tone", label: "Tone" },
@@ -679,7 +680,8 @@ async function pageBiopics() {
     h("div", { class: "tiles" },
       tile("Biopics", int(rows.length), `${rows.filter((r) => r.status === "Public").length} public`),
       tile("Films", int(rows.reduce((n, r) => n + r.films, 0)), `${mins(rows.reduce((n, r) => n + r.filmMinutes, 0))} in all`),
-      tile("Reported", int(rows.filter((r) => r.reports).length), "public biopics people reported", rows.some((r) => r.reports))),
+      tile("Reported", int(rows.filter((r) => r.reports).length), "public biopics people reported", rows.some((r) => r.reports)),
+      tile("Held for review", int(rows.filter((r) => r.held).length), "films the content check stopped", rows.some((r) => r.held))),
     eperfTable({ id: "bp", noun: "biopics", columns: biopicListCols, rows, sort: "updatedAt", dir: "desc", csv: "biopicker-biopics", emptyAll: "No one has started a biopic yet.", onRow: (r) => go({ tab: "biopic", id: r.id }) }));
 }
 
@@ -699,6 +701,24 @@ async function pageBiopic(id) {
     b.reports.length ? h("div", { class: "alertbar warn", role: "alert" }, h("span", { class: "ai", "aria-hidden": "true" }, "⚠"),
       h("div", {}, h("b", {}, `Reported ${b.reports.length} time${b.reports.length > 1 ? "s" : ""}`),
         ...b.reports.map((r) => h("div", { class: "small" }, `${when(r.at)}${r.by ? ` by ${r.by}` : ""}: ${r.reason || "(no reason given)"}`)))) : null,
+    ...b.checks.filter((c) => c.pending).map((c) => h("div", { class: "alertbar warn", role: "alert" }, h("span", { class: "ai", "aria-hidden": "true" }, "⚠"),
+      h("div", { class: "grow" }, h("b", {}, `${c.label} is held for review (${c.categories.join(", ")})`),
+        h("div", { class: "small" }, `${when(c.at)}: ${c.reason || "(no reason given)"}`),
+        c.notes ? h("div", { class: "small muted" }, `Checker's notes: ${c.notes}`) : null,
+        h("div", { class: "small muted" }, "Read the script below. If it's fine, allow it and the maker can render it. If not, leave it held; it stays held until the script changes and passes a new check.")),
+      h("button", { class: "btn sm", onclick: async (e) => {
+        if (!confirm(`Allow ${c.label} of “${P.name || "Untitled"}” to be rendered?`)) return;
+        e.target.disabled = true;
+        try {
+          await api("POST", `api/admin/biopics/${encodeURIComponent(b.id)}/checks/${encodeURIComponent(c.id)}/allow`);
+          toast(`${c.label} is allowed. ${b.owner?.username || "The maker"} can render it now.`);
+          refresh();
+        } catch (x) {
+          toast(x.message, true);
+          e.target.disabled = false;
+        }
+      } }, "Allow it"))),
+    b.flaggedPhotos ? h("p", { class: "small warn" }, `⚠ ${b.flaggedPhotos} photo${b.flaggedPhotos > 1 ? "s were" : " was"} flagged when uploaded; see Photos below.`) : null,
     h("h2", {}, "Films"),
     b.films.length ? h("div", { class: "bp-films" }, ...b.films.map((f) => h("div", { class: "card bp-film" },
       h("video", { controls: true, preload: "metadata", playsinline: true, src: file("output", f.file) },
@@ -711,15 +731,24 @@ async function pageBiopic(id) {
     section("Scripts", b.scripts.length, ...b.scripts.map((s) => h("div", { class: "bp-script" },
       h("h3", {}, `${s.label}: ${s.title || "untitled"}`), s.tagline ? h("p", { class: "muted" }, s.tagline) : null,
       h("ol", {}, ...s.scenes.map((sc) => h("li", {}, (sc.year || sc.place || sc.title) ? h("b", {}, [sc.year, sc.place, sc.title].filter(Boolean).join(" · ") + " — ") : null, sc.narration)))))),
-    section("Photos", b.photoCount, b.photos.length ? h("div", { class: "bp-photos" }, ...b.photos.map((ph) => h("figure", { class: ph.include ? "" : "off", title: ph.include ? "" : "left out of the films" },
+    section("Photos", b.photoCount, b.photos.length ? h("div", { class: "bp-photos" }, ...b.photos.map((ph) => h("figure", { class: (ph.include ? "" : "off") + (ph.concern ? " flag" : ""), title: ph.include ? "" : "left out of the films" },
       h("img", { src: file("thumbs", ph.file), alt: ph.caption || "", loading: "lazy" }),
+      ph.concern ? h("figcaption", { class: "small warn" }, `⚠ ${ph.concern}`) : null,
       h("figcaption", { class: "small" }, [ph.date, ph.place, ph.caption].filter(Boolean).join(" · "))))) : null,
       b.photoCount > b.photos.length ? h("p", { class: "small muted" }, `Showing the first ${b.photos.length} of ${b.photoCount}.`) : null),
     section("Interview answers", b.interview.length, ...b.interview.map((q) => h("div", { class: "bp-qa" }, h("div", { class: "small muted" }, q.question), h("div", {}, q.answer)))),
     section("Timeline", b.timeline.length, b.timeline.length ? smallTable([
       { key: "date", label: "Date" }, { key: "title", label: "Event" }, { key: "place", label: "Place" }, { key: "description", label: "Details", text: (r) => (r.description.length > 160 ? r.description.slice(0, 160) + "…" : r.description) },
     ], b.timeline, { sort: "date" }) : null),
-    section("Documents", b.documents.length, ...b.documents.map((d) => h("div", { class: "bp-qa" }, h("b", {}, d.name || "Document"), d.summary ? h("div", { class: "small" }, d.summary) : null))));
+    section("Documents", b.documents.length, ...b.documents.map((d) => h("div", { class: "bp-qa" }, h("b", {}, d.name || "Document"), d.summary ? h("div", { class: "small" }, d.summary) : null))),
+    section("Content checks", b.checks.length, b.checks.length ? smallTable([
+      { key: "at", label: "When", text: (r) => when(r.at) },
+      { key: "label", label: "Film" },
+      { key: "result", label: "Result", text: (r) => (r.result === "held" ? (r.allowedBy ? "Held, then allowed" : r.pending ? "⚠ Held" : "Held, since replaced") : r.result === "passed" ? "Passed" : "Skipped") },
+      { key: "categories", label: "Why", value: (r) => r.categories.join(", "), text: (r) => [r.categories.join(", "), r.reason].filter(Boolean).join(": ") },
+      { key: "notes", label: "Checker's notes", text: (r) => (r.notes.length > 160 ? r.notes.slice(0, 160) + "…" : r.notes) },
+      { key: "allowedBy", label: "Allowed by", text: (r) => (r.allowedBy ? `${r.allowedBy}, ${when(r.allowedAt)}` : "") },
+    ], b.checks, { sort: "at" }) : h("p", { class: "small muted" }, "No film of this biopic has been checked yet. Every render is checked first.")));
 }
 
 async function pagePlans() {

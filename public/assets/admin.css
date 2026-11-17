@@ -116,6 +116,8 @@ table.et.edit td.center { text-align: center; }
 .bp-photos { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin-top: 10px; }
 .bp-photos figure { margin: 0; }
 .bp-photos figure.off { opacity: .45; }
+.bp-photos figure.flag img { outline: 2px solid #f0b545; outline-offset: 1px; }
+.alertbar .grow { flex: 1; min-width: 220px; }
 .bp-photos img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; background: var(--panel2); }
 .bp-photos figcaption { color: var(--muted); margin-top: 3px; overflow-wrap: anywhere; }
 .bp-qa { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }

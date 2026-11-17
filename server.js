@@ -23,6 +23,7 @@ import * as usage from "./lib/usage.js";
 import * as pay from "./lib/payments.js";
 import * as visits from "./lib/visits.js";
 import * as alerts from "./lib/alerts.js";
+import * as safety from "./lib/safety.js";
 import { DATA_DIR, ROOT, ensureDir, newId, sortByDate } from "./lib/util.js";
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
@@ -122,8 +123,10 @@ const publicProject = (p) => ({
   films: p.films.map(publicFilm),
   renders: Object.fromEntries(Object.entries(p.renders).map(([v, f]) => [v, publicFilm(f)])),
   jobs: activeJobs(p.id).map(jobView),
+  safety: undefined, // reviewer notes stay in the admin panel; the maker sees only why a film is waiting
+  held: safety.heldForOwner(p),
 });
-const jobView = (j) => ({ id: j.id, type: j.type, version: j.version, label: j.label, status: j.status, progress: j.progress, error: j.error, log: j.log.slice(-40) });
+const jobView = (j) => ({ id: j.id, type: j.type, version: j.version, label: j.label, status: j.status, progress: j.progress, error: j.error, held: !!j.held, log: j.log.slice(-40) });
 /** AI is set up, and the account still has AI allowance this month (and series in its plan, when asked). */
 const needAI = (req, opts) => {
   if (!ai.aiConfigured()) throw Object.assign(new Error("AI is not configured on this server (ANTHROPIC_API_KEY)."), { status: 503 });
@@ -238,7 +241,7 @@ app.post("/api/pay/apple/purchase", wrap(async (req, res) => {
 
 // ---------- usage: every finished render is logged with its account, level, film length and render time ----------
 onJobFinished((job) => {
-  if (job.type !== "render") return;
+  if (job.type !== "render" || job.held) return; // a film held for review was never rendered
   let filmSeconds = 0;
   if (job.status === "done") {
     try {
@@ -269,8 +272,8 @@ onJobFinished(async (job) => {
   const name = p.person.name || "Your biopic";
   const ok = job.status === "done";
   await notify(u.devices, {
-    title: ok ? "Your film is ready" : "Render didn't finish",
-    body: ok ? `${name}: ${versionLabel(job.version)} is ready to watch.` : `${name}: ${versionLabel(job.version)} — ${job.error || "something went wrong"}`,
+    title: ok ? "Your film is ready" : job.held ? "Your film is waiting for a review" : "Render didn't finish",
+    body: ok ? `${name}: ${versionLabel(job.version)} is ready to watch.` : job.held ? `${name}: ${versionLabel(job.version)} will be looked at before it's made.` : `${name}: ${versionLabel(job.version)} — ${job.error || "something went wrong"}`,
     data: { projectId: p.id, step: "render" },
   }, (gone) => auth.removeDevice(gone));
 });
@@ -716,9 +719,20 @@ app.post("/api/projects/:id/series/render-all", wrap(async (req, res) => {
   const todo = (p.series?.episodes || []).map((e) => `ep${e.n}`).filter((v) => p.scripts[v] && !busyWith(p, "render", v) && (req.body?.all || !p.renders[v]));
   if (!todo.length) throw Object.assign(new Error("No episodes to render: write the episode scripts first (already-rendered ones are skipped)."), { status: 400 });
   usage.checkRender(req.user, todo, activeRenders(req.user));
-  const jobs = todo.map((v) => startJob({ projectId: p.id, type: "render", lane: "render", version: v, label: `Rendering ${versionLabel(v)}` }, ({ log, progress }) => renderFilm(p, v, { log, progress })));
-  res.json(jobs.map(jobView));
+  res.json(todo.map((v) => renderJob(p, v)).map(jobView));
 }));
+
+/** Queues one render. Its first step is the content check, so a held film costs no render time and no render from the plan. */
+function renderJob(p, version) {
+  return startJob({ projectId: p.id, type: "render", lane: "render", version, label: `Rendering ${versionLabel(version)}` }, async ({ log, progress }) => {
+    await safety.checkFilm(p, version, {
+      log,
+      save: () => saveProject(p),
+      onHeld: (c) => alerts.contentHeld({ projectId: p.id, name: p.person.name, owner: auth.getUser(p.ownerId)?.username, version: versionLabel(version), categories: c.categories, reason: c.reason }),
+    });
+    return renderFilm(p, version, { log, progress });
+  });
+}
 
 app.put("/api/projects/:id/scripts/:version", wrap(async (req, res) => {
   const p = P(req);
@@ -791,9 +805,7 @@ app.post("/api/projects/:id/render/:version", wrap(async (req, res) => {
   if (!p.scripts[version]) throw Object.assign(new Error("Write the script first."), { status: 400 });
   if (busyWith(p, "render", version)) throw Object.assign(new Error(`${versionLabel(version)} is already rendering or queued.`), { status: 409 });
   usage.checkRender(req.user, [version], activeRenders(req.user));
-  const job = startJob({ projectId: p.id, type: "render", lane: "render", version, label: `Rendering ${versionLabel(version)}` }, ({ log, progress }) =>
-    renderFilm(p, version, { log, progress }));
-  res.json(jobView(job));
+  res.json(jobView(renderJob(p, version)));
 }));
 
 // ---------- film versions (every render is kept until deleted) ----------
@@ -1092,6 +1104,8 @@ app.get("/api/admin/biopics", wrap(async (req, res) => {
       lastFilmAt: films[0]?.at || null,
       status: p.archivedAt ? "Archived" : p.public ? "Public" : "Private",
       reports: (reports[p.id] || []).length,
+      check: safety.checkStatus(p),
+      held: safety.pendingHolds(p).length,
       aiCost: cost[p.id] || 0,
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
@@ -1121,14 +1135,36 @@ app.get("/api/admin/biopics/:id", wrap(async (req, res) => {
     settings: { tone: p.settings?.tone || "", quality: p.settings?.quality || "", music: p.settings?.music || "" },
     films: filmsOf(p),
     scripts: Object.entries(p.scripts || {}).map(([version, s]) => ({ version, label: versionLabel(version), title: s.title || "", tagline: s.tagline || "", scenes: (s.scenes || []).map((sc) => ({ year: sc.year || "", place: placeName(sc.place), title: sc.onScreenTitle || "", narration: clip(sc.narration, 2000) })) })),
-    photos: p.photos.slice(0, 200).map((ph) => ({ file: ph.file, caption: clip(ph.caption, 300), date: ph.date || "", place: placeName(ph.place), include: ph.include !== false })),
+    photos: p.photos.slice(0, 200).map((ph) => ({ file: ph.file, caption: clip(ph.caption, 300), date: ph.date || "", place: placeName(ph.place), include: ph.include !== false, concern: ph.ai?.concern || "" })),
+    flaggedPhotos: p.photos.filter((ph) => ph.ai?.concern).length,
     photoCount: p.photos.length,
     documents: p.documents.map((d) => ({ name: d.name || "", summary: clip(d.summary, 1000) })),
     timeline: p.timeline.slice(0, 300).map((t) => ({ date: t.date || "", title: clip(t.title, 300), place: placeName(t.place), description: clip(t.description, 1000) })),
     interview: p.interview.filter((q) => q.answer).map((q) => ({ question: clip(q.question, 500), answer: clip(q.answer) })),
     reports: reportsByProject()[p.id] || [],
+    checks: [...(p.safety?.checks || [])].reverse().slice(0, 30).map((c) => ({ ...c, label: versionLabel(c.version), pending: !!(c.result === "held" && !c.allowedBy && safety.pendingHolds(p).includes(c)) })),
   });
 }));
+// let a film the content check held be rendered (the maker then renders it again)
+app.post("/api/admin/biopics/:id/checks/:cid/allow", wrap(async (req, res) => {
+  let p;
+  try {
+    p = loadProject(req.params.id);
+  } catch {
+    throw notFound();
+  }
+  const c = safety.allow(p, req.params.cid, req.user.username);
+  saveProject(p);
+  fs.appendFileSync(ADMIN_VIEWS_FILE, JSON.stringify({ at: c.allowedAt, admin: req.user.username, projectId: p.id, ownerId: p.ownerId || null, action: "allowed", check: c.id, version: c.version }) + "\n");
+  res.json({ ok: true });
+}));
+/** Admin banner lines for films waiting for review. */
+function heldAlerts() {
+  const held = allProjects().filter((p) => safety.pendingHolds(p).length);
+  if (!held.length) return [];
+  const names = held.slice(0, 3).map((p) => `“${p.person.name || "Untitled"}”`).join(", ") + (held.length > 3 ? ` and ${held.length - 3} more` : "");
+  return [{ level: "warn", tab: "biopics", text: `${held.length === 1 ? "A film is" : `${held.length} biopics have films`} waiting for review after the content check: ${names}.` }];
+}
 
 // end a web subscription now and refund part of this month's payment (the admin chooses the amount)
 app.get("/api/admin/accounts/:uid/refund", wrap(async (req, res) => res.json(await pay.refundQuote(accountUser(req.params.uid)))));
@@ -1172,7 +1208,7 @@ app.put("/api/admin/billing", wrap(async (req, res) => {
   res.json({ billing });
   alerts.checkFreeSpots().catch(() => {}); // a lower warning level may already be reached
 }));
-app.get("/api/admin/alerts", wrap(async (req, res) => res.json({ alerts: alerts.adminAlerts() })));
+app.get("/api/admin/alerts", wrap(async (req, res) => res.json({ alerts: [...alerts.adminAlerts(), ...heldAlerts()] })));
 app.post("/api/admin/alerts/test", wrap(async (req, res) => res.json(await alerts.testEmail())));
 
 const csvCell = (v) => (v == null ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
