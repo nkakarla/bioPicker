@@ -258,3 +258,12 @@ dialog.bp .authform { margin: 6px 0 0; }
 .plancard { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
 .plancard p { margin: 0; }
 .plancard.current { border-color: var(--gold); }
+/* your own voice and other languages */
+.ownrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.ownrow .meta { flex: 1 1 220px; }
+.ownrow .acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.passage { max-height: 34vh; overflow: auto; padding: 12px 14px; background: var(--panel2); border: 1px solid var(--line); border-radius: 9px; font-family: var(--serif); font-size: 17px; line-height: 1.6; }
+.recsteps { padding-left: 20px; margin: 0 0 10px; color: var(--muted); }
+.recsteps li { margin-bottom: 4px; }
+.recsteps b { color: var(--text); font-weight: 600; }
+.langs select { max-width: 240px; }

@@ -1459,7 +1459,7 @@ function vStyle() {
     const cur = s.voice || {};
     const sel = h("select", { id: "voiceSel", onchange: (e) => { const v = voices.find((x) => x.id === e.target.value); set({ voice: { provider: v.provider, id: v.id, label: v.label, rate: cur.rate || 0, pitch: cur.pitch || 0 } }, true); } },
       h("option", { value: "" }, "— choose a narrator —"),
-      ...list.map((v) => h("option", { value: v.id, selected: v.id === cur.id }, `${v.label} · ${v.gender} · ${v.locale}${v.personality ? " · " + v.personality : ""}`)));
+      ...list.map((v) => h("option", { value: v.id, selected: v.id === cur.id }, voiceName(v))));
     const rate = h("input", { type: "range", min: -30, max: 30, value: cur.rate || 0, oninput: (e) => { rl.textContent = `${e.target.value}%`; }, onchange: (e) => set({ voice: { ...P.settings.voice, rate: +e.target.value } }, true) });
     const pitch = h("input", { type: "range", min: -20, max: 20, value: cur.pitch || 0, oninput: (e) => { pl.textContent = `${e.target.value}%`; }, onchange: (e) => set({ voice: { ...P.settings.voice, pitch: +e.target.value } }, true) });
     const rl = h("span", { class: "muted small" }, `${cur.rate || 0}%`);
@@ -1469,7 +1469,7 @@ function vStyle() {
     const sv = s.storyVoice || {};
     const storySel = two ? h("select", { id: "storyVoiceSel", onchange: (e) => { const v = voices.find((x) => x.id === e.target.value); set({ storyVoice: v ? { provider: v.provider, id: v.id, label: v.label, rate: sv.rate || 0, pitch: sv.pitch || 0 } : null }, true); } },
       h("option", { value: "" }, "— same as the narrator —"),
-      ...list.map((v) => h("option", { value: v.id, selected: v.id === sv.id }, `${v.label} · ${v.gender} · ${v.locale}${v.personality ? " · " + v.personality : ""}`))) : null;
+      ...list.map((v) => h("option", { value: v.id, selected: v.id === sv.id }, voiceName(v)))) : null;
     fill(voiceBox, 
       h("div", { class: "grid2" },
         h("label", { class: "f full" }, two ? "Narrator voice (the history and background)" : "Narrator voice", sel),
@@ -1537,9 +1537,141 @@ function vStyle() {
         h("label", { class: "f" }, "Minutes per episode", h("input", { type: "number", min: 3, max: 30, value: Math.round((s.episodeSeconds || 600) / 60), onchange: (e) => set({ episodeSeconds: Math.max(3, Math.min(30, +e.target.value || 10)) * 60 }) })))),
     h("h2", { style: "margin-top:18px" }, "Narrator"),
     h("div", { class: "card" }, voiceBox),
+    ownVoiceCard(set, () => { voices = null; api("GET", "api/voices").then((v) => { voices = v; drawVoices(); }).catch(() => {}); }),
     sayNames(set),
     nextBtn("script"),
   );
+}
+
+const voiceName = (v) => (v.own ? `★ ${v.label} (your own voice)` : `${v.label} · ${v.gender} · ${v.locale}${v.personality ? " · " + v.personality : ""}`);
+const ownVoiceRef = (v) => ({ provider: "elevenlabs", id: v.id, label: v.name, rate: 0, pitch: 0 });
+let myVoices = null; // { ready, allowed, max, voices, consent }
+
+/** "Your own voice": a copy of the maker's voice (accent and all) made from a recording, for any language. */
+function ownVoiceCard(set, voicesChanged) {
+  const box = h("div", { class: "card ownvoice", hidden: true });
+  const two = isDoc() && P.story?.telling !== "third";
+  const hear = async (e, v) => {
+    const b = e.currentTarget;
+    b.disabled = true;
+    try {
+      const text = isDoc() ? "It was the summer everything changed, and I remember it as if it were yesterday." : `This is the story of ${P.person.preferredName || P.person.name || "a remarkable life"}.`;
+      const blob = await api("POST", "api/tts/preview", { voice: ownVoiceRef(v), text, pronounce: P.settings.pronounce || [] });
+      new Audio(URL.createObjectURL(blob)).play();
+    } catch (er) { toast(er.message, true); }
+    b.disabled = false;
+  };
+  const use = (key, v) => { set({ [key]: ownVoiceRef(v) }, true); render(); toast(`${v.name} will read ${key === "storyVoice" ? "your memories" : "the narration"}.`); };
+  const draw = () => {
+    const m = myVoices;
+    if (!m || !m.ready || !m.allowed) { box.hidden = true; return; }
+    box.hidden = false;
+    const inUse = (v) => [P.settings.voice?.id === v.id && "narrator", P.settings.storyVoice?.id === v.id && "memories"].filter(Boolean);
+    fill(box,
+      h("h3", { style: "margin-top:0" }, "Your own voice"),
+      h("p", { class: "small muted" }, "BioPicker can copy your voice, accent and all, from a recording of you reading aloud. Your voice can then read your film in English, and in Hindi, Telugu or any other language you translate it into. Only your account can use it."),
+      ...m.voices.map((v) => h("div", { class: "ownrow" },
+        h("span", { class: "meta" }, h("b", {}, `★ ${v.name}`), h("span", { class: "muted small" }, ` ${fmtDur(v.seconds || 0)} recorded${inUse(v).length ? " · reading the " + inUse(v).join(" and ") : ""}`)),
+        h("span", { class: "acts" },
+          h("button", { class: "btn sm", onclick: (e) => hear(e, v) }, "▶ Hear it"),
+          two ? h("button", { class: "btn sm", disabled: P.settings.storyVoice?.id === v.id, onclick: () => use("storyVoice", v) }, "Read my memories") : null,
+          h("button", { class: "btn sm", disabled: P.settings.voice?.id === v.id, onclick: () => use("voice", v) }, two ? "Narrate" : "Use as narrator"),
+          h("button", { class: "btn sm danger", title: "Delete this voice", onclick: async () => {
+            if (!confirm(`Delete the voice “${v.name}”? The copy is removed for good. Films already made keep their sound.`)) return;
+            try { myVoices = await api("DELETE", `api/my-voices/${v.id}`); draw(); voicesChanged(); } catch (er) { toast(er.message, true); }
+          } }, "🗑")))),
+      m.voices.length < m.max
+        ? h("button", { class: "btn primary", style: "margin-top:8px", onclick: () => recordVoice(() => { draw(); voicesChanged(); }) }, m.voices.length ? "🎙 Make another voice" : "🎙 Make my voice")
+        : h("p", { class: "small muted" }, `You can keep ${m.max} voices. Delete one to make another.`),
+      m.quota ? h("p", { class: "small muted" }, `Admin: ${m.quota.used.toLocaleString()} of ${m.quota.limit.toLocaleString()} voice characters used this month (a 5-minute film uses about 5,000).`) : null,
+    );
+  };
+  if (myVoices) draw();
+  else api("GET", "api/my-voices").then((m) => { myVoices = m; draw(); }).catch(() => {});
+  return box;
+}
+
+/** Records (or takes an uploaded recording of) the maker reading, and makes their voice from it. */
+function recordVoice(done) {
+  const passage = (isDoc() && P.story?.text ? P.story.text : P.interview?.map((q) => q.answer).filter(Boolean).join(" ") || "").replace(/\s+/g, " ").trim().slice(0, 1400) ||
+    "I grew up in a house full of people and noise. In the mornings my mother made tea for everyone, and my father read the newspaper aloud, arguing with it as he went. We walked to school along a dusty road, past the post office and the temple, counting the trains that went by. Years later I moved across the world, and I still remember those mornings better than almost anything since.";
+  let chunks = [];
+  let rec = null;
+  let stream = null;
+  let blob = null;
+  let started = 0;
+  let timer = null;
+  const status = h("span", { class: "muted small" }, "");
+  const player = h("audio", { controls: true, hidden: true, style: "width:100%;margin-top:8px" });
+  const nameIn = h("input", { placeholder: "e.g. your name", maxlength: 60 });
+  const agree = h("input", { type: "checkbox" });
+  const fileIn = h("input", { type: "file", accept: "audio/*,video/*,.m4a,.mp3,.wav", hidden: true, onchange: (e) => { const f = e.target.files[0]; if (f) { blob = f; player.src = URL.createObjectURL(f); player.hidden = false; status.textContent = `Chosen: ${f.name}`; makeBtn.disabled = false; } } });
+  const recBtn = h("button", { class: "btn primary" }, "● Start recording");
+  const makeBtn = h("button", { class: "btn primary", disabled: true }, "Make my voice");
+  const stopAll = () => { clearInterval(timer); stream?.getTracks().forEach((t) => t.stop()); stream = null; };
+  recBtn.onclick = async () => {
+    if (rec?.state === "recording") { rec.stop(); return; }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true } });
+    } catch {
+      toast("The microphone isn't available here. Record with your phone's voice recorder and choose the file instead.", true);
+      return;
+    }
+    chunks = [];
+    rec = new MediaRecorder(stream);
+    rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    rec.onstop = () => {
+      stopAll();
+      blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
+      player.src = URL.createObjectURL(blob);
+      player.hidden = false;
+      const secs = Math.round((Date.now() - started) / 1000);
+      status.textContent = secs < 30 ? `${secs} seconds: record at least 30 seconds (one to two minutes is best).` : `Recorded ${fmtDur(secs)}. Listen back, then make your voice.`;
+      makeBtn.disabled = secs < 30;
+      recBtn.textContent = "● Record again";
+    };
+    rec.start(1000);
+    started = Date.now();
+    recBtn.textContent = "■ Stop";
+    makeBtn.disabled = true;
+    player.hidden = true;
+    timer = setInterval(() => (status.textContent = `Recording… ${fmtDur((Date.now() - started) / 1000)}`), 500);
+  };
+  makeBtn.onclick = async () => {
+    if (!nameIn.value.trim()) return toast("Give the voice a name.", true);
+    if (!agree.checked) return toast("Tick the box to confirm this is your own voice.", true);
+    if (!blob) return;
+    makeBtn.disabled = true;
+    makeBtn.textContent = "Making your voice… (about a minute)";
+    try {
+      const fd = new FormData();
+      const ext = blob.name ? "" : (blob.type.includes("mp4") ? ".m4a" : blob.type.includes("ogg") ? ".ogg" : ".webm");
+      fd.append("sample", blob, blob.name || `recording${ext}`);
+      fd.append("name", nameIn.value.trim());
+      fd.append("consent", "yes");
+      myVoices = await api("POST", "api/my-voices", fd, true);
+      d.close();
+      toast("Your voice is ready. Press ▶ Hear it, then choose what it reads.");
+      done();
+    } catch (er) {
+      toast(er.message, true);
+      makeBtn.disabled = false;
+      makeBtn.textContent = "Make my voice";
+    }
+  };
+  const d = showDialog("Make your own voice",
+    h("ol", { class: "small recsteps" },
+      h("li", {}, "Find a quiet room. Hold the phone about a hand's width from your mouth."),
+      h("li", {}, "Press Start, then first say: ", h("b", {}, `“${(myVoices?.consent || "").replace("…", "(your name)")}”`)),
+      h("li", {}, "Then read the passage below in your normal voice, as if telling family, for one to two minutes. Don't put on a voice: the copy will sound just like you, accent and all.")),
+    h("div", { class: "passage" }, passage),
+    h("div", { class: "row", style: "margin-top:10px;flex-wrap:wrap;gap:8px" }, recBtn, h("button", { class: "btn", onclick: () => fileIn.click() }, "Or choose a recording…"), fileIn, status),
+    player,
+    h("div", { class: "grid2", style: "margin-top:10px" },
+      h("label", { class: "f" }, "Name for this voice", nameIn)),
+    h("label", { class: "check small", style: "margin-top:8px;display:flex;gap:8px;align-items:flex-start" }, agree, h("span", {}, "This is my own voice, and I agree to BioPicker making an AI copy of it for my films. Only my account can use it, and I can delete it at any time.")),
+    h("div", { class: "row", style: "margin-top:10px" }, h("span", { class: "spacer" }), makeBtn));
+  d.addEventListener("close", () => { if (rec?.state === "recording") rec.stop(); stopAll(); });
 }
 
 /** "How to say names": respellings the voices read, so place and family names come out right; captions keep the real spelling. */
@@ -1587,18 +1719,102 @@ function thumbFor(v) {
   return h("div", { class: "th" }, { card: "🅣 title card", archival: "🎞 not found yet", still: "📷 not found yet", art: "🖼 not found yet", photo: "📷", map: "🗺" }[v.type] || v.type);
 }
 
-const vLabel = (v) => (v === "short" ? "Short version" : v === "long" ? "Long version" : `Episode ${v.slice(2)}`);
+// a translated version is "short-te": the short version in Telugu
+const baseOf = (v) => String(v).split("-")[0];
+const langOf = (v) => String(v).split("-")[1] || "";
+let LANGS = null; // [{ code, name, native }]
+const langName = (code) => LANGS?.find((l) => l.code === code)?.name || code;
+const loadLangs = () => LANGS ? Promise.resolve(LANGS) : api("GET", "api/langs").then((l) => (LANGS = l)).catch(() => (LANGS = []));
+const vLabel = (v) => {
+  const b = baseOf(v);
+  const name = b === "short" ? "Short version" : b === "long" ? "Long version" : `Episode ${b.slice(2)}`;
+  return langOf(v) ? `${name} · ${langName(langOf(v))}` : name;
+};
+/** Translations of one version that exist, e.g. translationsOf("short") → ["short-hi", "short-te"]. */
+const translationsOf = (base) => Object.keys(P.scripts || {}).filter((v) => baseOf(v) === base && langOf(v)).sort();
 const episodes = () => P.series?.episodes || [];
 const fmtDur = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
 
 function scriptTabs() {
   const tab = (v, label) => h("button", { class: scriptTab === v ? "on" : "", onclick: () => { scriptTab = v; render(); } }, label, P.scripts[v] ? " ✓" : "");
+  const langTabs = (base, short) => translationsOf(base).map((v) => tab(v, `${short} · 🌐 ${langName(langOf(v))}`));
   return h("div", { class: "tabs" },
     tab("short", `Short · ${P.settings.shortSeconds}s`),
+    ...langTabs("short", "Short"),
     tab("long", `Long · ${Math.round(P.settings.longSeconds / 60)} min`),
+    ...langTabs("long", "Long"),
     isDoc() ? null : h("span", { class: "sep" }),
     isDoc() ? null : h("button", { class: scriptTab === "series" ? "on" : "", onclick: () => { scriptTab = "series"; render(); } }, "📺 Series plan"),
-    ...episodes().map((e) => tab(`ep${e.n}`, `Ep ${e.n}`)));
+    ...episodes().flatMap((e) => [tab(`ep${e.n}`, `Ep ${e.n}`), ...langTabs(`ep${e.n}`, `Ep ${e.n}`)]));
+}
+
+/** Starts a translation of one version ("short") into a language ("te"). */
+async function startTranslate(base, lang) {
+  await flush();
+  try {
+    const j = await api("POST", `api/projects/${P.id}/translate/${base}`, { lang });
+    P.jobs = [...(P.jobs || []), j];
+    updateJobUI(j);
+    render();
+    watchJob(j, { onDone: (x) => { if (x.status === "done") { scriptTab = `${base}-${lang}`; render(); } } });
+  } catch (e) { toast(e.message, true); }
+}
+
+/** On an English script: make it in another language. */
+function translateCard(base) {
+  const sel = h("select", { "aria-label": "Language" }, ...(LANGS || []).map((l) => h("option", { value: l.code }, `${l.name} · ${l.native}`)));
+  const have = translationsOf(base);
+  const busy = (P.jobs || []).some((j) => j.type === "translate" && baseOf(j.version || "") === base);
+  return h("div", { class: "card langs" },
+    h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
+      h("b", {}, "🌐 In another language"),
+      sel,
+      h("button", { class: "btn", disabled: busy || !health.ai, onclick: () => {
+        const v = `${base}-${sel.value}`;
+        if (P.scripts[v] && !confirm(`There is already a ${vLabel(v)} script. Translate again from this English script? Your edits to the ${langName(sel.value)} script will be replaced (you can undo it from File → Undo a change).`)) return;
+        startTranslate(base, sel.value);
+      } }, busy ? "Translating…" : "Translate"),
+      ...have.map((v) => h("button", { class: "btn sm ghost", onclick: () => { scriptTab = v; render(); } }, `${langName(langOf(v))} ✓`))),
+    h("p", { class: "small muted", style: "margin:6px 0 0" }, "Claude translates the narration, your memories, titles, captions and map names. The pictures, maps and music stay the same. You can read and edit the translation before you render it, and it becomes its own film."));
+}
+
+/** On a translated script: which voices read it. Your own voice speaks every language; free voices are per language. */
+function langVoiceCard(v) {
+  const lang = langOf(v);
+  const two = isDoc() && P.story?.telling !== "third";
+  const box = h("div", { class: "card" });
+  const pick = () => (P.settings.langVoices ||= {})[lang] ||= {};
+  const saveLV = () => patch({ settings: { langVoices: P.settings.langVoices } }, 0);
+  const draw = () => {
+    if (!voices) return fill(box, h("span", { class: "muted" }, "Loading voices…"));
+    const fit = voices.filter((x) => x.own || x.locale.toLowerCase().startsWith(lang));
+    const auto = (base) => (base?.provider === "elevenlabs" ? `Automatic: ${base.label} (your own voice)` : `Automatic: a ${langName(lang)} voice`);
+    const select = (key, base) => h("select", { onchange: (e) => { const x = voices.find((y) => y.id === e.target.value); pick()[key] = x ? { provider: x.provider, id: x.id, label: x.label, rate: 0, pitch: 0 } : null; saveLV(); } },
+      h("option", { value: "" }, auto(base)),
+      ...fit.map((x) => h("option", { value: x.id, selected: pick()[key]?.id === x.id }, voiceName(x))));
+    const hear = async (e, key, base) => {
+      const b = e.currentTarget;
+      const s = P.scripts[v];
+      const sc = s?.scenes.find((x) => (key === "storyVoice" ? x.voice === "story" : x.voice !== "story") && x.narration) || s?.scenes[0];
+      const chosen = pick()[key]?.id ? pick()[key] : base?.provider === "elevenlabs" ? base : fit.find((x) => !x.own) && { provider: "edge", id: fit.find((x) => !x.own).id };
+      if (!chosen?.id) return toast("Choose a voice first.", true);
+      b.disabled = true;
+      try { const blob = await api("POST", "api/tts/preview", { voice: chosen, text: (sc?.narration || "").slice(0, 300), lang }); new Audio(URL.createObjectURL(blob)).play(); } catch (er) { toast(er.message, true); }
+      b.disabled = false;
+    };
+    fill(box,
+      h("h3", { style: "margin-top:0" }, `Voices for the ${langName(lang)} film`),
+      h("div", { class: "grid2" },
+        h("label", { class: "f" }, two ? "Narrator" : "Narrator voice", select("voice", P.settings.voice)),
+        two ? h("label", { class: "f" }, "Your memories", select("storyVoice", P.settings.storyVoice)) : null),
+      h("div", { class: "row", style: "margin-top:8px" },
+        h("button", { class: "btn sm", onclick: (e) => hear(e, "voice", P.settings.voice) }, "▶ Hear the narrator"),
+        two ? h("button", { class: "btn sm", onclick: (e) => hear(e, "storyVoice", P.settings.storyVoice) }, "▶ Hear the memories") : null),
+      h("p", { class: "small muted" }, "Automatic keeps your own voice if it reads the English film (it speaks every language), and otherwise uses a free voice for this language."));
+  };
+  if (!voices) api("GET", "api/voices").then((x) => { voices = x; draw(); }).catch(() => {});
+  draw();
+  return box;
 }
 
 function seriesView() {
@@ -1657,14 +1873,18 @@ function seriesView() {
 }
 
 function vScript() {
-  if (isDoc() && !["short", "long"].includes(scriptTab)) scriptTab = "short";
-  if (scriptTab === "series" || (scriptTab.startsWith("ep") && !episodes().some((e) => `ep${e.n}` === scriptTab))) {
+  if (!LANGS) loadLangs().then(() => render());
+  // a translation that no longer exists falls back to the English script
+  if (langOf(scriptTab) && !P.scripts[scriptTab] && !(P.jobs || []).some((j) => j.type === "translate" && j.version === scriptTab)) scriptTab = baseOf(scriptTab);
+  if (isDoc() && !["short", "long"].includes(baseOf(scriptTab))) scriptTab = "short";
+  if (scriptTab === "series" || (scriptTab.startsWith("ep") && !episodes().some((e) => `ep${e.n}` === baseOf(scriptTab)))) {
     scriptTab = "series";
     return seriesView();
   }
+  const lang = langOf(scriptTab);
   const s = P.scripts[scriptTab];
-  const ep = episodes().find((e) => `ep${e.n}` === scriptTab);
-  const busy = (P.jobs || []).some((j) => ["script", "media"].includes(j.type) && (!j.version || j.version === scriptTab));
+  const ep = episodes().find((e) => `ep${e.n}` === baseOf(scriptTab));
+  const busy = (P.jobs || []).some((j) => ["script", "media", "translate"].includes(j.type) && (!j.version || j.version === scriptTab));
   const sid = P.id;
   const tab = scriptTab;
   const url = `api/projects/${sid}/scripts/${tab}`;
@@ -1690,9 +1910,14 @@ function vScript() {
     aiWarn(),
     scriptTabs(),
     ep ? h("div", { class: "card" }, h("b", {}, `Episode ${ep.n}: ${ep.title}`), ep.from ? h("span", { class: "muted small" }, `  ·  ${ep.from}${ep.to && ep.to !== ep.from ? "–" + ep.to : ""}`) : null, h("div", { class: "muted small" }, ep.logline)) : null,
+    s && !lang ? translateCard(scriptTab) : null,
+    lang && s ? h("p", { class: "small muted" }, `This is the ${langName(lang)} translation of the ${vLabel(baseOf(scriptTab)).toLowerCase()}. Read it through and correct anything that sounds wrong. If you change the English script later, translate it again.`) : null,
+    lang && s ? langVoiceCard(scriptTab) : null,
     s && P.renders[scriptTab] ? h("p", { class: "small muted" }, `Already rendered as v${P.renders[scriptTab].n}. Edit freely: the next render is saved as v${P.renders[scriptTab].n + 1} and earlier versions are kept.`) : null,
     h("div", { class: "row", style: "margin-bottom:14px" },
-      h("button", { class: "btn primary", disabled: busy || !health.ai, onclick: () => { if (s && !confirm(`Rewrite the whole ${vLabel(scriptTab)} script with AI? Your edits to it will be replaced (rendered films keep their own copy of the script).`)) return; write(); } }, s ? "Rewrite script" : `Write the ${vLabel(scriptTab).toLowerCase()} script`),
+      lang
+        ? h("button", { class: "btn", disabled: busy || !health.ai, onclick: () => { if (!confirm(`Translate the English ${vLabel(baseOf(scriptTab)).toLowerCase()} into ${langName(lang)} again? Your edits to this translation will be replaced (you can undo it from File → Undo a change).`)) return; startTranslate(baseOf(scriptTab), lang); } }, busy ? "Translating…" : "Translate again from English")
+        : h("button", { class: "btn primary", disabled: busy || !health.ai, onclick: () => { if (s && !confirm(`Rewrite the whole ${vLabel(scriptTab)} script with AI? Your edits to it will be replaced (rendered films keep their own copy of the script).`)) return; write(); } }, s ? "Rewrite script" : `Write the ${vLabel(scriptTab).toLowerCase()} script`),
       s ? h("button", { class: "btn", disabled: busy, onclick: async () => { const j = await api("POST", `api/projects/${P.id}/scripts/${scriptTab}/media`); updateJobUI(j); watchJob(j); } }, "Re-find media") : null,
       s ? h("span", { class: "muted small" }, `${s.scenes.length} scenes · ${words} words ≈ ${Math.round(words / 2.4)}s narration · tone: ${s.tone}${s.mediaResolvedAt ? "" : " · media needs refresh"}`) : null,
       h("span", { class: "spacer" }),
@@ -1791,7 +2016,7 @@ function vRender() {
       cur
         ? h("div", { style: "margin-top:12px" },
             h("video", { controls: true, preload: "metadata", src: fileUrl("output", cur.file) + `?t=${encodeURIComponent(cur.at)}` },
-              cur.vtt ? h("track", { kind: "captions", src: fileUrl("output", cur.vtt), srclang: P.person.language || "en", label: "Captions" }) : null),
+              cur.vtt ? h("track", { kind: "captions", src: fileUrl("output", cur.vtt), srclang: langOf(v) || P.person.language || "en", label: langOf(v) ? langName(langOf(v)) : "Captions" }) : null),
             h("div", { class: "row", style: "margin-top:8px" },
               h("b", {}, `v${cur.n}${cur.label ? " · " + cur.label : ""}`),
               h("span", { class: "muted small" }, `${fmtDur(cur.seconds)} · ${cur.quality} · ${new Date(cur.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`),
@@ -1817,15 +2042,19 @@ function vRender() {
     );
   };
 
+  if (!LANGS) loadLangs().then(() => render());
   const eps = episodes().map((e) => `ep${e.n}`);
-  const orphans = [...new Set(P.films.map((f) => f.version))].filter((v) => !["short", "long", ...eps].includes(v));
+  // each film is followed by its translations (short, short · Telugu, long, ...)
+  const withLangs = (v) => [filmCard(v), ...translationsOf(v).map(filmCard)];
+  const shown = new Set(["short", "long", ...eps].flatMap((v) => [v, ...translationsOf(v)]));
+  const orphans = [...new Set(P.films.map((f) => f.version))].filter((v) => !shown.has(v));
   const unrendered = eps.filter((v) => P.scripts[v] && !P.renders[v] && !queuedFor(v)).length;
   return h("section", {},
     h("h1", {}, "Render the film"),
     h("p", { class: "lead" }, "Narration is recorded, photos get the Ken Burns treatment, maps fly to each place, newsreels and art are cut in, and the score ducks under the voice. Every render is kept as a new version (v1, v2, …) until you delete it, so you can edit the script and render again without losing anything."),
     running ? h("div", { class: "card" }, h("b", {}, running.label), h("div", { class: "progress", style: "margin:10px 0" }, h("div", { id: "renderBar", style: `width:${Math.round(running.progress * 100)}%` })), h("div", { class: "log", id: "renderLog" }, (running.log || []).join("\n"))) : null,
-    filmCard("short"),
-    filmCard("long"),
+    ...withLangs("short"),
+    ...withLangs("long"),
     eps.length
       ? h("div", {},
           h("div", { class: "group-h" },
@@ -1833,7 +2062,7 @@ function vRender() {
             h("span", { class: "muted small" }, `${eps.length} episodes`),
             h("span", { class: "spacer" }),
             unrendered ? h("button", { class: "btn primary", onclick: async () => { try { await flush(); const r = await api("POST", `api/projects/${P.id}/series/render-all`); native?.({ type: "wantNotifications" }); for (const j of r) { updateJobUI(j); watchJob(j); } P.jobs = [...(P.jobs || []), ...r]; render(); toast(`${r.length} episode(s) queued; they render one after another.`); } catch (e) { toast(e.message, true); } } }, `Render ${unrendered} unrendered episode${unrendered > 1 ? "s" : ""}`) : null),
-          ...eps.map(filmCard))
+          ...eps.flatMap(withLangs))
       : h("div", { class: "card muted small" }, "Want a multi-episode documentary? ", h("a", { href: "#", onclick: (e) => { e.preventDefault(); scriptTab = "series"; go("script"); } }, "Plan a series"), " on the Script step."),
     ...orphans.map(filmCard),
   );

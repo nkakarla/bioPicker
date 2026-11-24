@@ -18,13 +18,17 @@ import {
 } from "./lib/store.js";
 import { applyDocx, buildDocx, parseDocx, versionLabel } from "./lib/word.js";
 import { readZip, writeZip } from "./lib/zip.js";
-import { castingShortlist, listVoices, spokenText, synthesize } from "./lib/tts.js";
+import {
+  castingShortlist, cloneVoice, deleteClonedVoice, listVoices, ownVoiceQuota, ownVoiceReady, spokenText, synthesize, voiceAllowed,
+} from "./lib/tts.js";
+import { LANGS, baseOf, langOf, langVersion } from "./lib/langs.js";
+import { translateScript } from "./lib/translate.js";
 import * as usage from "./lib/usage.js";
 import * as pay from "./lib/payments.js";
 import * as visits from "./lib/visits.js";
 import * as alerts from "./lib/alerts.js";
 import * as safety from "./lib/safety.js";
-import { DATA_DIR, ROOT, ensureDir, newId, sortByDate } from "./lib/util.js";
+import { DATA_DIR, ROOT, ensureDir, ffmpeg, newId, probeDuration, sortByDate } from "./lib/util.js";
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
 
@@ -188,6 +192,7 @@ app.post("/api/account/delete", wrap(async (req, res) => {
   // stop a web subscription before the account goes (fails the deletion if Stripe can't be reached, so nobody keeps being charged)
   await pay.cancelForDeletion(req.user);
   const erased = eraseOwner(req.user.id);
+  await forgetOwnVoices(req.user);
   auth.deleteUser(req.user);
   res.setHeader("Set-Cookie", auth.sessionCookie("", secure(req), 0));
   res.json({ ok: true, erased });
@@ -380,7 +385,14 @@ app.post("/api/projects/import", importUpload.single("backup"), wrap(async (req,
 app.get("/api/projects/:id", wrap(async (req, res) => res.json(publicProject(P(req)))));
 
 const PERSON_KEYS = Object.keys(emptyProject("x").person);
-const SETTING_KEYS = ["tone", "quality", "shortSeconds", "longSeconds", "voice", "storyVoice", "music", "burnCaptions", "includeArchival", "includeArt", "episodeCount", "episodeSeconds"];
+const SETTING_KEYS = ["tone", "quality", "shortSeconds", "longSeconds", "music", "burnCaptions", "includeArchival", "includeArt", "episodeCount", "episodeSeconds"];
+/** A voice choice from the browser: a free voice, or one of the project owner's own copied voices. */
+const cleanVoice = (v, owner) => {
+  if (!v?.id) return null;
+  const out = { provider: v.provider === "elevenlabs" ? "elevenlabs" : "edge", id: String(v.id).slice(0, 100), label: String(v.label || "").slice(0, 100), rate: Math.max(-30, Math.min(30, Math.round(Number(v.rate) || 0))), pitch: Math.max(-20, Math.min(20, Math.round(Number(v.pitch) || 0))) };
+  if (!voiceAllowed(out, owner)) throw Object.assign(new Error("That voice belongs to another account."), { status: 403 });
+  return out;
+};
 /** "How to say names": [{ word, say }] the voices read instead of the written spelling. */
 const cleanPronounce = (list) =>
   (Array.isArray(list) ? list : [])
@@ -406,6 +418,14 @@ app.patch("/api/projects/:id", wrap(async (req, res) => {
   if (b.settings) {
     for (const k of SETTING_KEYS) if (k in b.settings) p.settings[k] = b.settings[k];
     if ("pronounce" in b.settings) p.settings.pronounce = cleanPronounce(b.settings.pronounce);
+    const owner = auth.getUser(p.ownerId);
+    for (const k of ["voice", "storyVoice"]) if (k in b.settings) p.settings[k] = cleanVoice(b.settings[k], owner);
+    // voices for translated films: { te: { voice, storyVoice } }; an empty choice means "automatic"
+    if (b.settings.langVoices && typeof b.settings.langVoices === "object") {
+      const lv = {};
+      for (const [l, x] of Object.entries(b.settings.langVoices)) if (LANGS[l] && x) lv[l] = { voice: cleanVoice(x.voice, owner), storyVoice: cleanVoice(x.storyVoice, owner) };
+      p.settings.langVoices = lv;
+    }
     p.settings.shortSeconds = Math.max(30, Math.min(300, Number(p.settings.shortSeconds) || 90));
     p.settings.longSeconds = Math.max(120, Math.min(1800, Number(p.settings.longSeconds) || 360));
     p.settings.episodeCount = Math.max(0, Math.min(20, Math.round(Number(p.settings.episodeCount) || 0)));
@@ -630,7 +650,8 @@ app.post("/api/projects/:id/research", wrap(async (req, res) => {
 }));
 
 // ---------- voices ----------
-app.get("/api/voices", wrap(async (req, res) => res.json(await listVoices())));
+app.get("/api/voices", wrap(async (req, res) => res.json(await listVoices(req.user))));
+app.get("/api/langs", (req, res) => res.json(Object.entries(LANGS).map(([code, l]) => ({ code, name: l.name, native: l.native }))));
 
 app.post("/api/projects/:id/voice/cast", wrap(async (req, res) => {
   needAI(req);
@@ -646,12 +667,93 @@ app.post("/api/projects/:id/voice/cast", wrap(async (req, res) => {
 
 const previewDir = ensureDir(path.join(DATA_DIR, "previews"));
 app.post("/api/tts/preview", wrap(async (req, res) => {
-  const { voice, text, pronounce } = req.body || {};
-  if (!voice?.id) throw Object.assign(new Error("voice required"), { status: 400 });
+  const { text, pronounce } = req.body || {};
+  const voice = cleanVoice(req.body?.voice, req.user);
+  if (!voice) throw Object.assign(new Error("voice required"), { status: 400 });
+  const lang = LANGS[req.body?.lang] ? req.body.lang : "";
+  const say = String(text || "This is the story of a remarkable life.").slice(0, 400);
   const f = path.join(previewDir, `${newId(10)}.mp3`);
-  await synthesize(voice, spokenText(String(text || "This is the story of a remarkable life.").slice(0, 400), cleanPronounce(pronounce)), f);
+  await synthesize(voice, lang ? say : spokenText(say, cleanPronounce(pronounce)), f, { lang });
   res.setHeader("Content-Type", "audio/mpeg");
   res.sendFile(f, () => fs.rm(f, { force: true }, () => {}));
+}));
+
+// ---------- your own voice (a copy made from your recordings, ElevenLabs) ----------
+// Who may make one: admins, plus anyone named in OWN_VOICE_USERS or on a plan in OWN_VOICE_PLANS
+// (comma lists). The ElevenLabs plan is shared, so this is off for everyone else by default.
+const csvSet = (s) => new Set(String(s || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean));
+const mayOwnVoice = (u) =>
+  !!u && (usage.isAdmin(u) || csvSet(process.env.OWN_VOICE_USERS).has(u.username) || csvSet(process.env.OWN_VOICE_PLANS).has(String(usage.planOf(u)?.id || "").toLowerCase()));
+const MAX_OWN_VOICES = 3;
+const voiceDir = (u) => path.join(DATA_DIR, "voices", u.id);
+/** What the maker says first, so every copied voice starts with its owner's permission on record. */
+const consentLine = (name) => `My name is ${name || "…"}. This is my own voice, and I agree to BioPicker making a copy of it for my films.`;
+const ownVoiceView = async (u) => ({
+  ready: ownVoiceReady(),
+  allowed: mayOwnVoice(u),
+  max: MAX_OWN_VOICES,
+  voices: (u.voices || []).map((v) => ({ id: v.id, name: v.name, at: v.at, seconds: v.seconds })),
+  consent: consentLine(""),
+  quota: usage.isAdmin(u) ? await ownVoiceQuota() : null,
+});
+async function forgetOwnVoices(u) {
+  for (const v of u.voices || []) await deleteClonedVoice(v.id).catch((e) => console.error("[voice] delete", v.id, e.message));
+  fs.rmSync(voiceDir(u), { recursive: true, force: true });
+}
+
+app.get("/api/my-voices", wrap(async (req, res) => res.json(await ownVoiceView(req.user))));
+
+app.post("/api/my-voices", upload.array("sample", 3), wrap(async (req, res) => {
+  const u = req.user;
+  if (!ownVoiceReady()) throw Object.assign(new Error("Own voices aren't set up on this server yet."), { status: 503 });
+  if (!mayOwnVoice(u)) throw Object.assign(new Error("Your own voice isn't part of your plan yet."), { status: 403 });
+  if ((u.voices || []).length >= MAX_OWN_VOICES) throw Object.assign(new Error(`You can keep ${MAX_OWN_VOICES} voices. Delete one to make another.`), { status: 400 });
+  if (req.body?.consent !== "yes") throw Object.assign(new Error("Tick the box to confirm this is your own voice."), { status: 400 });
+  const name = String(req.body?.name || "").trim().slice(0, 60);
+  if (!name) throw Object.assign(new Error("Give the voice a name, e.g. your own name."), { status: 400 });
+  const files = (req.files || []).filter((f) => /^(audio|video)\//.test(f.mimetype) || /\.(mp3|m4a|wav|webm|ogg|aac|mp4|caf|flac)$/i.test(f.originalname));
+  if (!files.length) throw Object.assign(new Error("Record or choose a recording of your voice."), { status: 400 });
+  const id = newId(8);
+  const dir = ensureDir(path.join(voiceDir(u), id));
+  try {
+    // every recording becomes a clean mono mp3 (phones record m4a/webm); at most 5 minutes in all is used
+    const mp3s = [];
+    let seconds = 0;
+    for (const [i, f] of files.entries()) {
+      const raw = path.join(dir, `raw${i}${path.extname(f.originalname).toLowerCase() || ".bin"}`);
+      fs.writeFileSync(raw, f.buffer);
+      const out = path.join(dir, `sample${i + 1}.mp3`);
+      try {
+        await ffmpeg(["-i", raw, "-vn", "-ac", "1", "-ar", "44100", "-t", String(Math.max(10, 300 - seconds)), "-b:a", "192k", out]);
+      } catch {
+        throw Object.assign(new Error(`“${f.originalname}” isn't a recording BioPicker can read.`), { status: 400 });
+      } finally {
+        fs.rmSync(raw, { force: true });
+      }
+      seconds += await probeDuration(out);
+      mp3s.push(out);
+      if (seconds >= 300) break;
+    }
+    if (seconds < 30) throw Object.assign(new Error(`That's ${Math.round(seconds)} seconds of speech. Record at least 30 seconds; one to two minutes works best.`), { status: 400 });
+    const voiceId = await cloneVoice({ name: `BioPicker ${u.username} · ${name}`, files: mp3s, description: `Own voice of BioPicker account ${u.username}, made with their recorded consent.` });
+    u.voices = [...(u.voices || []), { id: voiceId, name, at: new Date().toISOString(), seconds: Math.round(seconds), dir: id, consent: consentLine(name), ip: ip(req) }];
+    auth.updateUser(u);
+    res.json(await ownVoiceView(u));
+  } catch (e) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
+}));
+
+app.delete("/api/my-voices/:vid", wrap(async (req, res) => {
+  const u = req.user;
+  const v = (u.voices || []).find((x) => x.id === req.params.vid);
+  if (!v) throw Object.assign(new Error("That voice is already gone."), { status: 404 });
+  await deleteClonedVoice(v.id);
+  u.voices = u.voices.filter((x) => x !== v);
+  auth.updateUser(u);
+  if (v.dir) fs.rmSync(path.join(voiceDir(u), v.dir), { recursive: true, force: true });
+  res.json(await ownVoiceView(u));
 }));
 
 // ---------- music upload ----------
@@ -685,8 +787,8 @@ const checkVersion = (v) => {
   if (!VERSION_RE.test(v)) throw Object.assign(new Error("version must be short, long or ep1..ep20"), { status: 400 });
   return v;
 };
-const episodeOf = (p, v) => (v.startsWith("ep") ? p.series?.episodes?.find((e) => e.n === Number(v.slice(2))) || null : null);
-const secondsFor = (p, v) => (v === "short" ? p.settings.shortSeconds : v === "long" ? p.settings.longSeconds : p.settings.episodeSeconds);
+const episodeOf = (p, v) => (baseOf(v).startsWith("ep") ? p.series?.episodes?.find((e) => e.n === Number(baseOf(v).slice(2))) || null : null);
+const secondsFor = (p, v) => (baseOf(v) === "short" ? p.settings.shortSeconds : baseOf(v) === "long" ? p.settings.longSeconds : p.settings.episodeSeconds);
 const busyWith = (p, type, version) => activeJobs(p.id).some((j) => j.type === type && (!version || j.version === version));
 
 /** Writes (or rewrites) one version's script and finds its media. AI usage is charged to that version's level. */
@@ -718,6 +820,7 @@ async function writeVersionScriptNow(p, version, { log, progress = () => {} }) {
 app.post("/api/projects/:id/scripts/:version", wrap(async (req, res) => {
   const p = P(req);
   const version = checkVersion(req.params.version);
+  if (langOf(version)) throw Object.assign(new Error("A translated script is made from the English one: use Translate."), { status: 400 });
   needAI(req, { series: version.startsWith("ep") });
   if (version.startsWith("ep") && !episodeOf(p, version)) throw Object.assign(new Error("Plan the series first."), { status: 400 });
   if (busyWith(p, "script", version)) throw Object.assign(new Error(`${versionLabel(version)} is already being written.`), { status: 409 });
@@ -761,7 +864,7 @@ app.put("/api/projects/:id/series", wrap(async (req, res) => {
       return { ...o, n: i + 1, title: String(e.title ?? o.title ?? "").slice(0, 200), logline: String(e.logline ?? o.logline ?? "").slice(0, 1000), from: String(e.from ?? o.from ?? "").slice(0, 20), to: String(e.to ?? o.to ?? "").slice(0, 20) };
     });
     // scripts of removed episodes go too; their rendered films stay until deleted
-    for (const v of Object.keys(p.scripts)) if (v.startsWith("ep") && Number(v.slice(2)) > p.series.episodes.length) delete p.scripts[v];
+    for (const v of Object.keys(p.scripts)) if (v.startsWith("ep") && Number(baseOf(v).slice(2)) > p.series.episodes.length) delete p.scripts[v];
   }
   saveProject(p);
   res.json(publicProject(p));
@@ -792,6 +895,31 @@ app.post("/api/projects/:id/series/render-all", wrap(async (req, res) => {
   res.json(todo.map((v) => renderJob(p, v)).map(jobView));
 }));
 
+// ---------- translation: the same film in another language ----------
+app.post("/api/projects/:id/translate/:version", wrap(async (req, res) => {
+  const p = P(req);
+  const base = checkVersion(req.params.version);
+  const lang = String(req.body?.lang || "");
+  if (langOf(base)) throw Object.assign(new Error("Translate from the English script."), { status: 400 });
+  if (!LANGS[lang]) throw Object.assign(new Error("Choose a language."), { status: 400 });
+  if (!p.scripts[base]) throw Object.assign(new Error("Write the English script first."), { status: 400 });
+  needAI(req, { series: base.startsWith("ep") });
+  const target = langVersion(base, lang);
+  if (busyWith(p, "translate", target) || busyWith(p, "script", base)) throw Object.assign(new Error(`${versionLabel(target)} is already being made.`), { status: 409 });
+  const job = startJob({ projectId: p.id, type: "translate", version: target, label: `Translating into ${LANGS[lang].name}` }, ({ log, progress }) =>
+    usage.withUsage({ version: target }, async () => {
+      log(`Translating ${versionLabel(base)} into ${LANGS[lang].name} (${p.scripts[base].scenes.length} scenes)…`);
+      progress(0.1);
+      const copy = await translateScript(p, base, lang, { log });
+      if (p.scripts[target]) snapshotProject(p, `Before translating ${versionLabel(base)} into ${LANGS[lang].name} again`);
+      p.scripts[target] = copy;
+      saveProject(p);
+      log(`Done: ${versionLabel(target)} is ready to read and edit.`);
+      progress(1);
+    }));
+  res.json(jobView(job));
+}));
+
 /** Queues one render. Its first step is the content check, so a held film costs no render time and no render from the plan. */
 function renderJob(p, version) {
   return startJob({ projectId: p.id, type: "render", lane: "render", version, label: `Rendering ${versionLabel(version)}` }, async ({ log, progress }) => {
@@ -800,7 +928,8 @@ function renderJob(p, version) {
       save: () => saveProject(p),
       onHeld: (c) => alerts.contentHeld({ projectId: p.id, name: p.person.name, owner: auth.getUser(p.ownerId)?.username, version: versionLabel(version), categories: c.categories, reason: c.reason }),
     });
-    return renderFilm(p, version, { log, progress });
+    const owner = auth.getUser(p.ownerId);
+    return renderFilm(p, version, { log, progress, voiceOk: (v) => voiceAllowed(v, owner) && (v.provider !== "elevenlabs" || ownVoiceReady()) });
   });
 }
 
