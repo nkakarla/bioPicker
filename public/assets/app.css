@@ -210,13 +210,16 @@ dialog.bp .row.end { margin-top: 14px; }
 .projitem div.projrow { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 1px dashed var(--line); border-radius: 10px; background: var(--panel); }
 .projitem.archived .projrow { opacity: .8; }
 .rowacts { display: flex; flex-direction: column; gap: 4px; }
+.rowacts.film { display: grid; grid-template-columns: auto auto; }
+.rowacts a.btn { text-align: center; text-decoration: none; }
+video.watchvid { display: block; width: 100%; max-height: 65vh; background: #000; border-radius: 8px; }
 .btn.ghost.danger { color: var(--red); }
 .btn.danger-fill { background: var(--red); border-color: var(--red); color: #fff; }
 .btn.danger-fill:hover { background: #e07560; }
 details.fold { margin-top: 18px; }
 details.fold > summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-bottom: 10px; }
 .banner { display: flex; align-items: center; gap: 12px; justify-content: space-between; border: 1px solid var(--gold); background: rgba(214, 171, 94, .08); border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-size: 14px; }
-@media (max-width: 640px) { .projitem { flex-direction: column; align-items: stretch; } .rowacts { flex-direction: row; justify-content: flex-end; } }
+@media (max-width: 640px) { .projitem { flex-direction: column; align-items: stretch; } .rowacts { flex-direction: row; justify-content: flex-end; } .rowacts.film { grid-template-columns: repeat(4, auto); justify-content: end; } }
 .hero details.fold p.small { font-size: 13px; margin: 0 0 10px; text-align: left; }
 .hero .recent > p.small { font-size: 13px; text-align: left; }
 

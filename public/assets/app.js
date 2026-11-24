@@ -104,12 +104,14 @@ function route() {
     P = null;
     return renderHome();
   }
-  step = m[2] || step;
+  if (m[2]) step = m[2];
   if (!P || P.id !== m[1]) {
     if (P && isDirty()) flush();
     api("GET", `api/projects/${m[1]}`)
       .then((p) => {
         P = p;
+        // opened without a step: a finished film opens on the player, anything else at the start
+        if (!m[2]) step = p.films?.length ? "render" : firstStep(p.kind);
         remember(P);
         render();
         watchJobs();
@@ -562,12 +564,14 @@ function drawProjects(list, trash = []) {
   };
   const bits = (c) => c ? [c.photos && `${c.photos} picture${c.photos > 1 ? "s" : ""}`, c.events && `${c.events} event${c.events > 1 ? "s" : ""}`, c.answers && `${c.answers} answer${c.answers > 1 ? "s" : ""}`, c.scripts && "script ready", c.films && "film rendered"].filter(Boolean).join(" · ") : "";
   const row = (x) => h("div", { class: "projitem" + (x.archivedAt ? " archived" : "") },
-    h("a", { href: `#p=${x.id}`, class: "projrow" },
+    h("a", { href: x.film ? `#p=${x.id}&s=render` : `#p=${x.id}`, class: "projrow" },
       x.cover ? h("img", { src: `files/${x.id}/thumbs/${encodeURIComponent(x.cover)}`, alt: "", loading: "lazy" }) : h("span", { class: "ph" }, "🎬"),
       h("span", { class: "meta" }, h("b", {}, x.name, x.kind === "documentary" ? h("span", { class: "tag" }, " Documentary") : null, x.public ? h("span", { class: "tag ok", title: "Anyone with the link can watch" }, " 🌐 Public") : null), h("span", { class: "muted small" }, [x.archivedAt ? `Archived ${ago(x.archivedAt)}` : `Last saved ${ago(x.updatedAt)}`, bits(x.counts)].filter(Boolean).join(" · "))),
-      h("span", { class: "go" }, x.archivedAt ? "Open →" : "Continue →")),
+      h("span", { class: "go" }, x.archivedAt || x.film ? "Open →" : "Continue →")),
     x.counts
-      ? h("div", { class: "rowacts" },
+      ? h("div", { class: "rowacts" + (x.film ? " film" : "") },
+          x.film ? h("button", { class: "btn sm primary", title: "Play the latest film", onclick: () => watchFilm(x) }, "▶ Watch") : null,
+          x.film ? h("a", { class: "btn sm", href: `files/${x.id}/output/${encodeURIComponent(x.film.file)}?download=1`, title: "Download the latest film (MP4)" }, "⬇ Download") : null,
           h("button", { class: "btn sm ghost", title: x.archivedAt ? "Move back to your films" : "Hide from this list; nothing is changed or deleted", onclick: () => setArchived(x.id, !x.archivedAt, renderHome) }, x.archivedAt ? "Unarchive" : "Archive"),
           h("button", { class: "btn sm ghost danger", title: "Delete this film project", onclick: () => deleteBiopic(x, renderHome) }, "Delete"))
       : null);
@@ -589,6 +593,20 @@ function drawProjects(list, trash = []) {
               h("button", { class: "btn sm ghost danger", onclick: () => purgeDeleted(t) }, "Delete forever")))))
       : null,
   );
+}
+
+/** Plays a project's latest film from the home list, without opening the project's steps. */
+function watchFilm(x) {
+  const f = x.film;
+  const src = `files/${x.id}/output/${encodeURIComponent(f.file)}`;
+  const d = showDialog(x.name,
+    h("video", { class: "watchvid", controls: true, autoplay: true, playsinline: true, preload: "metadata", src: `${src}?t=${encodeURIComponent(f.at)}` }),
+    h("div", { class: "row", style: "margin-top:10px" },
+      h("span", { class: "muted small" }, `${vLabel(f.version)} · v${f.n} · ${fmtDur(f.seconds)}`),
+      h("span", { class: "spacer" }),
+      h("a", { class: "btn sm", href: `${src}?download=1` }, "⬇ Download MP4"),
+      h("a", { class: "btn sm", href: `#p=${x.id}&s=render`, onclick: () => d.close() }, "All versions & edits →")));
+  d.addEventListener("close", () => d.querySelector("video")?.pause());
 }
 
 async function setArchived(id, archived, then) {
