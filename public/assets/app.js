@@ -687,7 +687,8 @@ const authForm = (onSubmit, ...kids) => {
   return f;
 };
 function authInput(label, name, attrs = {}) {
-  const input = h("input", { name, ...attrs });
+  // a shown password is a plain text field: stop phone keyboards capitalising or "correcting" it
+  const input = h("input", { name, ...(attrs.type === "password" ? { autocapitalize: "none", autocorrect: "off", spellcheck: "false" } : {}), ...attrs });
   if (attrs.type !== "password") return h("label", { class: "f" }, label, input);
   // every password field gets an eye that shows/hides what was typed
   const eye = h("button", { type: "button", class: "pw-eye", "aria-label": "Show password", title: "Show password", onclick: () => {

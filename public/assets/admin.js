@@ -398,7 +398,7 @@ async function pageAccounts() {
 }
 
 function pwInput(name, attrs = {}) {
-  const input = h("input", { name, type: "password", ...attrs });
+  const input = h("input", { name, type: "password", autocapitalize: "none", autocorrect: "off", spellcheck: "false", ...attrs });
   const eye = h("button", { type: "button", class: "pw-eye", "aria-label": "Show password", title: "Show password", onclick: () => {
     const show = input.type === "password";
     input.type = show ? "text" : "password";
