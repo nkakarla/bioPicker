@@ -1,6 +1,6 @@
 {
   "name": "biopicker",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "BioPicker - AI biopic and documentary maker. Copyright (c) 2026 EPerf",
   "type": "module",
   "main": "server.js",
