@@ -92,6 +92,15 @@ input[type="range"] { padding: 0; accent-color: var(--gold); }
 .hist .m { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
 .hist .m ul { margin: 6px 0 8px; padding-left: 18px; }
 .hist .inf { border-left: 3px solid var(--gold); padding-left: 10px; font-style: italic; color: #e2d6bf; }
+.hist .m.pick { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: start; cursor: pointer; }
+.hist .m.pick > input { width: 18px; height: 18px; margin-top: 4px; }
+.hist .m.pick h3 { margin: 0 0 6px; }
+.hist .m.pick p { margin: 0 0 8px; }
+.hist .m.off { opacity: .5; }
+.factchecks { border-color: var(--gold); }
+.factchecks ul { margin: 6px 0 0; padding-left: 18px; }
+.factchecks li { margin-bottom: 6px; }
+.scene .hd select.who { width: auto; font-size: 13px; padding: 4px 6px; }
 
 .tones { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .tone { cursor: pointer; border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: var(--panel); }
@@ -128,6 +137,12 @@ video { width: 100%; border-radius: 10px; background: #000; border: 1px solid va
 .hero h1 { font-size: 44px; }
 .hero p { color: var(--muted); max-width: 640px; margin: 10px auto 26px; font-size: 17px; }
 .hero p.rules-note { font-size: 13px; margin: 12px auto 0; }
+.starts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; max-width: 860px; margin: 0 auto; text-align: left; }
+.start { display: flex; flex-direction: column; gap: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+.start > b { font-family: var(--serif); font-size: 20px; }
+.start .row { flex-wrap: nowrap; margin-top: 6px; }
+.start .row input { flex: 1; min-width: 0; }
+@media (max-width: 700px) { .starts { grid-template-columns: minmax(0, 1fr); } .start .row { flex-wrap: wrap; } .start .row .btn { width: 100%; } }
 p.rules-note { margin: 10px 2px 0; }
 .notice.held { margin-top: 12px; padding: 10px 14px; border: 1px solid #b8862f; border-radius: 10px; background: rgba(214, 150, 40, .12); font-size: 14px; line-height: 1.5; }
 .recent { max-width: 520px; margin: 30px auto 0; text-align: left; }

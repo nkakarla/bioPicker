@@ -332,7 +332,7 @@ app.post("/api/projects/:id/visibility", wrap(async (req, res) => {
 
 // ---------- projects ----------
 app.get("/api/projects", wrap(async (req, res) => res.json(listProjects(req.user.id))));
-app.post("/api/projects", wrap(async (req, res) => res.json(createProject(String(req.body?.name || "").slice(0, 120), req.user.id))));
+app.post("/api/projects", wrap(async (req, res) => res.json(createProject(String(req.body?.name || "").slice(0, 120), req.user.id, req.body?.kind === "documentary" ? "documentary" : "biopic"))));
 
 // archive (hide from the main list) and delete (to Recently deleted for 30 days, then gone)
 app.post("/api/projects/:id/archive", wrap(async (req, res) => {
@@ -380,12 +380,23 @@ app.post("/api/projects/import", importUpload.single("backup"), wrap(async (req,
 app.get("/api/projects/:id", wrap(async (req, res) => res.json(publicProject(P(req)))));
 
 const PERSON_KEYS = Object.keys(emptyProject("x").person);
-const SETTING_KEYS = ["tone", "quality", "shortSeconds", "longSeconds", "voice", "music", "burnCaptions", "includeArchival", "includeArt", "episodeCount", "episodeSeconds"];
+const SETTING_KEYS = ["tone", "quality", "shortSeconds", "longSeconds", "voice", "storyVoice", "music", "burnCaptions", "includeArchival", "includeArt", "episodeCount", "episodeSeconds"];
+const STORY_LIMITS = { about: 300, period: 100, place: 200, text: 60000, telling: 10, wording: 10 };
 
 app.patch("/api/projects/:id", wrap(async (req, res) => {
   const p = P(req);
   const b = req.body || {};
   if (b.person) for (const k of PERSON_KEYS) if (k in b.person) p.person[k] = String(b.person[k] ?? "").slice(0, 5000);
+  if (b.story && typeof b.story === "object") {
+    for (const [k, max] of Object.entries(STORY_LIMITS)) if (k in b.story) p.story[k] = String(b.story[k] ?? "").slice(0, max);
+    if (!["first", "third"].includes(p.story.telling)) p.story.telling = "first";
+    if (!["keep", "polish", "notes"].includes(p.story.wording)) p.story.wording = "polish";
+  }
+  // documentary background: the maker ticks which researched events go into the film
+  if (Array.isArray(b.researchPicks) && p.research) {
+    const pick = Object.fromEntries(b.researchPicks.map((x) => [x.id, !!x.include]));
+    for (const e of p.research.events) if (e.id in pick) e.include = pick[e.id];
+  }
   if (b.settings) {
     for (const k of SETTING_KEYS) if (k in b.settings) p.settings[k] = b.settings[k];
     p.settings.shortSeconds = Math.max(30, Math.min(300, Number(p.settings.shortSeconds) || 90));
@@ -417,6 +428,7 @@ app.patch("/api/projects/:id", wrap(async (req, res) => {
       if (!u) continue;
       for (const k of ["caption", "date", "place", "eventId"]) if (k in u) ph[k] = u[k] == null ? null : String(u[k]).slice(0, 1000);
       if ("include" in u) ph.include = !!u.include;
+      if ("illustration" in u) ph.illustration = !!u.illustration;
     }
   }
   if (Array.isArray(b.interview)) {
@@ -456,6 +468,8 @@ app.post("/api/projects/:id/photos", upload.array("photos", 200), wrap(async (re
       errors.push(e.message);
     }
   }
+  // documentaries are mostly illustrated from memory; each picture can be switched to "real photo" after upload
+  if (p.kind === "documentary") for (const a of added) a.illustration = true;
   p.photos.push(...added);
   saveProject(p);
   analyzePhotos(p, added);
@@ -563,6 +577,51 @@ app.post("/api/projects/:id/context", wrap(async (req, res) => {
   res.json(jobView(job));
 }));
 
+// ---------- documentaries: the maker's script and the background research ----------
+const xmlText = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(+n)).replace(/&amp;/g, "&");
+/** Plain text of an uploaded script: .txt / .md as is, .docx paragraph by paragraph. */
+function scriptText(file) {
+  const ext = path.extname(file.originalname || "").toLowerCase();
+  if ([".txt", ".md", ".text"].includes(ext)) return file.buffer.toString("utf8").replace(/^﻿/, "");
+  if (ext === ".docx") {
+    let xml;
+    try {
+      xml = readZip(file.buffer).find((e) => e.name === "word/document.xml")?.data?.toString("utf8");
+    } catch {}
+    if (!xml) throw Object.assign(new Error("That file isn't a Word .docx document."), { status: 400 });
+    const body = xml.replace(/<w:tab\/>/g, "\t").replace(/<w:br[^>]*\/>/g, "\n").replace(/<\/w:p>/g, "\n").replace(/<[^>]+>/g, "");
+    return xmlText(body).replace(/\n{3,}/g, "\n\n").trim();
+  }
+  throw Object.assign(new Error("Upload the script as a Word (.docx) or text (.txt) file. For a PDF, copy its text and paste it in."), { status: 400 });
+}
+
+app.post("/api/projects/:id/story/file", upload.single("file"), wrap(async (req, res) => {
+  const p = P(req);
+  if (!req.file) throw Object.assign(new Error("No file"), { status: 400 });
+  const text = scriptText(req.file).slice(0, STORY_LIMITS.text);
+  if (!text.trim()) throw Object.assign(new Error("That file has no text in it."), { status: 400 });
+  p.story.text = text;
+  saveProject(p);
+  res.json(publicProject(p));
+}));
+
+app.post("/api/projects/:id/research", wrap(async (req, res) => {
+  needAI(req);
+  const p = P(req);
+  if (!p.story.text.trim()) throw Object.assign(new Error("Add your script first."), { status: 400 });
+  if (busyWith(p, "research")) throw Object.assign(new Error("The research is already running."), { status: 409 });
+  const job = startJob({ projectId: p.id, type: "research", label: "Researching the background" }, async ({ progress }) => {
+    progress(0.1);
+    const r = await ai.researchTopic(p);
+    // keep the maker's earlier ticks for events that come back with the same title
+    const was = Object.fromEntries((p.research?.events || []).map((e) => [e.title, e.include]));
+    r.events = r.events.map((e) => ({ id: newId(6), ...e, include: was[e.title] ?? true }));
+    p.research = { ...r, createdAt: new Date().toISOString() };
+    saveProject(p);
+  });
+  res.json(jobView(job));
+}));
+
 // ---------- voices ----------
 app.get("/api/voices", wrap(async (req, res) => res.json(await listVoices())));
 
@@ -630,10 +689,14 @@ async function writeVersionScriptNow(p, version, { log, progress = () => {} }) {
   if (version.startsWith("ep") && !episode) throw new Error(`Episode ${version.slice(2)} isn't in the series plan.`);
   const secs = secondsFor(p, version);
   log(`Writing a ${p.settings.tone} script for ${versionLabel(version)}${episode ? ` "${episode.title}"` : ""} (~${Math.round(secs / 60)} min)…`);
-  const s = await ai.writeScript(p, version, secs, episode);
+  const doc = p.kind === "documentary";
+  if (doc && !p.story.text.trim()) throw new Error("Add your script on the Your story step first.");
+  const s = doc ? await ai.writeDocumentary(p, version, secs) : await ai.writeScript(p, version, secs, episode);
+  if (doc) for (const sc of s.scenes) sc.voice = sc.voice === "story" && p.story.telling !== "third" ? "story" : "narrator";
   const { words } = ai.wordBudget(secs, p.settings.voice?.rate);
   const count = () => s.scenes.reduce((a, sc) => a + String(sc.narration).split(/\s+/).filter(Boolean).length, 0);
-  for (let pass = 0; pass < 2 && count() > words * 1.1; pass++) {
+  // a documentary that keeps the maker's own sentences is never machine-shortened
+  for (let pass = 0; pass < 2 && !ai.keepsWording(p) && count() > words * 1.1; pass++) {
     log(`Script has ${count()} words; tightening to ~${words}…`);
     await ai.tightenScript(s, words);
   }
@@ -748,6 +811,7 @@ app.put("/api/projects/:id/scripts/:version", wrap(async (req, res) => {
       const o = old[s.id] || { id: newId(6), visuals: [], kind: "life", transition: "fade", eventId: "" };
       const out = { ...o };
       for (const k of ["narration", "onScreenTitle", "onScreenSubtitle", "year", "place", "kind", "transition"]) if (k in s) out[k] = String(s[k] ?? "").slice(0, 4000);
+      if ("voice" in s) out.voice = s.voice === "story" ? "story" : "narrator";
       if (Array.isArray(s.visuals)) {
         out.visuals = s.visuals.slice(0, 6).map((v, i) => {
           const prev = o.visuals.find((x) => x.type === v.type && x.ref === v.ref) || (typeof v.i === "number" ? o.visuals[v.i] : null);
@@ -1092,7 +1156,8 @@ app.get("/api/admin/biopics", wrap(async (req, res) => {
       name: p.person.name || "Untitled",
       owner: users[p.ownerId] || "(no account)",
       ownerId: p.ownerId || null,
-      occupation: p.person.occupation || "",
+      kind: p.kind || "biopic",
+      occupation: p.kind === "documentary" ? `Documentary${p.story?.about ? ": " + p.story.about : ""}` : p.person.occupation || "",
       born: p.person.born || "",
       died: p.person.died || "",
       language: p.person.language || "",
@@ -1132,6 +1197,8 @@ app.get("/api/admin/biopics/:id", wrap(async (req, res) => {
     status: p.archivedAt ? "Archived" : p.public ? "Public" : "Private",
     publishedAt: p.publishedAt || null,
     person: Object.fromEntries(Object.entries(p.person).map(([k, v]) => [k, clip(v, 2000)])),
+    kind: p.kind || "biopic",
+    story: p.kind === "documentary" ? { ...p.story, text: clip(p.story?.text, 60000) } : null,
     settings: { tone: p.settings?.tone || "", quality: p.settings?.quality || "", music: p.settings?.music || "" },
     films: filmsOf(p),
     scripts: Object.entries(p.scripts || {}).map(([version, s]) => ({ version, label: versionLabel(version), title: s.title || "", tagline: s.tagline || "", scenes: (s.scenes || []).map((sc) => ({ year: sc.year || "", place: placeName(sc.place), title: sc.onScreenTitle || "", narration: clip(sc.narration, 2000) })) })),

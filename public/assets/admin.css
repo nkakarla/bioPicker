@@ -122,4 +122,5 @@ table.et.edit td.center { text-align: center; }
 .bp-photos figcaption { color: var(--muted); margin-top: 3px; overflow-wrap: anywhere; }
 .bp-qa { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .bp-qa:last-child { border-bottom: 0; }
+.bp-story { font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; }
 @media (max-width: 860px) { .bp-films { grid-template-columns: 1fr; } .bp-facts { grid-template-columns: 1fr; } .bp-facts dd { margin-bottom: 6px; } }

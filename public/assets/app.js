@@ -64,6 +64,18 @@ const STEPS = [
   ["script", "Script & media"],
   ["render", "Render film"],
 ];
+// a documentary starts from the maker's own script and pictures; the AI adds the history around it
+const DOC_STEPS = [
+  ["story", "Your story"],
+  ["media", "Pictures"],
+  ["history", "Background"],
+  ["style", "Style, length & voice"],
+  ["script", "Script & media"],
+  ["render", "Render film"],
+];
+const isDoc = () => P?.kind === "documentary";
+const steps = () => (isDoc() ? DOC_STEPS : STEPS);
+const firstStep = (kind) => (kind === "documentary" ? "story" : "person");
 
 const recent = () => {
   try {
@@ -137,10 +149,27 @@ async function tracked(fn) {
 
 let saveTimer;
 let patchWaiters = [];
+/** Folds a new edit into the unsaved ones without losing either: sections merge by field, and the lists that
+ *  carry only changed records (photos, research picks) merge by id. Whole lists (timeline, interview) replace. */
+const MERGE_BY_ID = new Set(["photos", "researchPicks"]);
+function mergePending(a, b) {
+  const out = { ...a };
+  for (const [k, v] of Object.entries(b)) {
+    const was = out[k];
+    if (MERGE_BY_ID.has(k) && Array.isArray(v) && Array.isArray(was)) {
+      const byId = new Map(was.map((x) => [x.id, x]));
+      for (const x of v) byId.set(x.id, { ...(byId.get(x.id) || {}), ...x });
+      out[k] = [...byId.values()];
+    } else if (v && was && typeof v === "object" && typeof was === "object" && !Array.isArray(v) && !Array.isArray(was)) out[k] = { ...was, ...v };
+    else out[k] = v;
+  }
+  return out;
+}
+
 function patch(body, delay = 500) {
   clearTimeout(saveTimer);
   const id = P.id;
-  if (Object.keys(body).length) patch.pending = { ...(patch.pending || {}), ...body };
+  if (Object.keys(body).length) patch.pending = mergePending(patch.pending || {}, body);
   updateSaveUI();
   return new Promise((res) => {
     patchWaiters.push(res);
@@ -160,7 +189,7 @@ function patch(body, delay = 500) {
           out = P;
         } catch (e) {
           // keep the unsaved edits so "Save now" (or the next edit) retries them
-          patch.pending = { ...b, ...(patch.pending || {}) };
+          patch.pending = mergePending(b, patch.pending || {});
           toast(`Not saved: ${e.message}`, true);
           updateSaveUI();
         }
@@ -230,7 +259,7 @@ function updateSaveUI() {
 async function saveNow() {
   try {
     await flush();
-    if (!isDirty()) toast("All changes saved. You can close this tab and continue later from “All biopics”.");
+    if (!isDirty()) toast("All changes saved. You can close this tab and continue later from “All films”.");
   } catch (e) {
     toast(e.message, true);
   }
@@ -263,9 +292,10 @@ function fileMenu() {
   menu.append(
     h("summary", { class: "btn sm ghost" }, "File ▾"),
     h("div", { class: "pop" },
-      item("Download Word document", "Everything you've entered, the photos and the scripts, to edit in Word", downloadWord),
-      item("Update from Word…", "Upload the edited .docx; changes are applied and can be undone", () => wordInput.click()),
-      item("Undo a change…", "Go back to before a Word upload or script restore", showHistory),
+      // the Word round trip is laid out for biopics (person, timeline, interview), so documentaries skip it
+      isDoc() ? null : item("Download Word document", "Everything you've entered, the photos and the scripts, to edit in Word", downloadWord),
+      isDoc() ? null : item("Update from Word…", "Upload the edited .docx; changes are applied and can be undone", () => wordInput.click()),
+      item("Undo a change…", isDoc() ? "Go back to before a script restore" : "Go back to before a Word upload or script restore", showHistory),
       h("hr"),
       item(P.public ? "🌐 Public link…" : "Make public…", P.public ? "Anyone with the link can watch the films" : "Let anyone with a link watch the finished films", publicDialog),
       item("Copy link", "Continue this biopic in another browser or device", copyLink),
@@ -274,7 +304,7 @@ function fileMenu() {
       P.archivedAt
         ? item("Unarchive", "Put this biopic back in your main list", () => setArchived(P.id, false, render))
         : item("Archive", "Hide from the main list; nothing is changed or deleted", () => setArchived(P.id, true, render)),
-      item("Delete biopic…", "Move to Recently deleted (restorable for 30 days)", () => deleteBiopic({ id: P.id, name: P.person.name, archivedAt: P.archivedAt, counts: { films: P.films.length } }))),
+      item(isDoc() ? "Delete documentary…" : "Delete biopic…", "Move to Recently deleted (restorable for 30 days)", () => deleteBiopic({ id: P.id, name: P.person.name, archivedAt: P.archivedAt, counts: { films: P.films.length } }))),
     wordInput,
   );
   document.addEventListener("click", (e) => { if (!menu.contains(e.target)) menu.open = false; });
@@ -427,12 +457,12 @@ function renderProjBar() {
   fill(bar);
   if (!P) return;
   bar.append(
-    h("span", { class: "muted small" }, "Biopic of"),
+    h("span", { class: "muted small" }, isDoc() ? "Documentary" : "Biopic of"),
     h("b", {}, P.person.name || "Untitled"),
     h("span", { id: "saveStat", class: "savestat ok", role: "status", "aria-live": "polite" }),
     h("button", { class: "btn sm", onclick: saveNow, title: "Save everything now (edits also save automatically as you type)" }, "Save now"),
     fileMenu(),
-    h("button", { class: "btn sm ghost", onclick: () => (location.hash = "") }, "All biopics"),
+    h("button", { class: "btn sm ghost", onclick: () => (location.hash = "") }, "All films"),
   );
   updateSaveUI();
 }
@@ -443,15 +473,16 @@ function renderSteps() {
   if (!P) return;
   const done = {
     person: !!P.person.name,
+    story: !!P.story?.text?.trim(),
     media: P.photos.length > 0,
     timeline: P.timeline.length > 0,
     interview: P.interview.some((q) => q.answer),
-    history: !!P.context,
+    history: isDoc() ? !!P.research : !!P.context,
     style: !!P.settings.voice,
     script: Object.keys(P.scripts).length > 0,
     render: Object.keys(P.renders).length > 0,
   };
-  STEPS.forEach(([k, label], i) =>
+  steps().forEach(([k, label], i) =>
     nav.append(
       h("button", { class: (k === step ? "on " : "") + (done[k] ? "done" : ""), onclick: () => go(k), "aria-current": k === step ? "step" : null },
         h("span", { class: "n" }, done[k] && k !== step ? "✓" : i + 1), label),
@@ -460,16 +491,20 @@ function renderSteps() {
 }
 
 function render() {
+  // a step from the other kind of project (e.g. a link to "The person" on a documentary) opens the first step
+  if (P && !steps().some(([k]) => k === step)) step = firstStep(P.kind);
   renderProjBar();
   renderSteps();
   if (!P) return;
-  const views = { person: vPerson, media: vMedia, timeline: vTimeline, interview: vInterview, history: vHistory, style: vStyle, script: vScript, render: vRender };
+  const views = isDoc()
+    ? { story: vStory, media: vMedia, history: vResearch, style: vStyle, script: vScript, render: vRender }
+    : { person: vPerson, media: vMedia, timeline: vTimeline, interview: vInterview, history: vHistory, style: vStyle, script: vScript, render: vRender };
   const scrollY = window.scrollY;
   const active = document.activeElement?.id;
   fill(main, 
     P.archivedAt ? h("div", { class: "banner" }, "🗄 This biopic is archived, so it's hidden from your main list. You can still view and edit it.", h("button", { class: "btn sm", onclick: () => setArchived(P.id, false, render) }, "Unarchive")) : null,
     h("div", { id: "jobs", class: "jobs" }),
-    (views[step] || vPerson)());
+    views[step]());
   for (const j of P.jobs || []) updateJobUI(j);
   window.scrollTo(0, scrollY);
   if (active && document.getElementById(active)) document.getElementById(active).focus();
@@ -490,11 +525,21 @@ function renderHome() {
   fill(main, 
     h("div", { class: "hero" },
       h("h1", {}, "Every life is a film."),
-      h("p", {}, "Upload photos, documents, dates and places. BioPicker interviews you, researches the history around each moment, casts a narrator, and cuts a Ken Burns–style biopic with public-domain newsreels, art and music."),
-      h("div", { class: "row", style: "justify-content:center" },
-        h("input", { id: "newName", placeholder: "Whose story? e.g. Grandma Rose Alvarez", style: "max-width:340px" }),
-        h("button", { class: "btn primary", onclick: newProject }, "Start a biopic")),
-      h("p", { class: "small muted rules-note" }, "Biopics are for honouring real lives. Please follow our ", h("a", { href: "terms.html#rules", target: "_blank" }, "content rules"), ": nothing sexual, hateful, violent or meant to hurt someone."),
+      h("p", {}, "Make a biopic of someone's life, or a documentary from your own story. BioPicker researches the history around it, casts a narrator, and cuts a Ken Burns–style film with your pictures, public-domain newsreels, maps and music."),
+      h("div", { class: "starts" },
+        h("div", { class: "start" },
+          h("b", {}, "A biopic"),
+          h("span", { class: "small muted" }, "Someone's life, from photos, documents and an interview."),
+          h("div", { class: "row" },
+            h("input", { id: "newName", placeholder: "Whose story? e.g. Grandma Rose Alvarez" }),
+            h("button", { class: "btn primary", onclick: () => newProject("biopic") }, "Start a biopic"))),
+        h("div", { class: "start" },
+          h("b", {}, "A documentary"),
+          h("span", { class: "small muted" }, "Your own script and pictures, with the history around them."),
+          h("div", { class: "row" },
+            h("input", { id: "newDocName", placeholder: "Working title, e.g. The Summer of '65" }),
+            h("button", { class: "btn primary", onclick: () => newProject("documentary") }, "Start a documentary")))),
+      h("p", { class: "small muted rules-note" }, "Films are for telling real stories. Please follow our ", h("a", { href: "terms.html#rules", target: "_blank" }, "content rules"), ": nothing sexual, hateful, violent or meant to hurt someone."),
       h("div", { class: "recent", id: "projList" }, h("p", { class: "muted small" }, "Loading your saved biopics…")),
       h("div", { class: "restore" },
         h("label", { class: "btn sm ghost" }, "Restore a backup (.zip)…",
@@ -504,7 +549,8 @@ function renderHome() {
   Promise.all([api("GET", "api/projects"), api("GET", "api/trash").catch(() => [])])
     .then(([list, trash]) => drawProjects(list, trash))
     .catch(() => drawProjects(recent().map((x) => ({ id: x.id, name: x.name, updatedAt: new Date(x.at).toISOString() })), []));
-  $("#newName").addEventListener("keydown", (e) => e.key === "Enter" && newProject());
+  $("#newName").addEventListener("keydown", (e) => e.key === "Enter" && newProject("biopic"));
+  $("#newDocName").addEventListener("keydown", (e) => e.key === "Enter" && newProject("documentary"));
 }
 
 function drawProjects(list, trash = []) {
@@ -514,27 +560,27 @@ function drawProjects(list, trash = []) {
     const d = new Date(t);
     return isNaN(d) ? "" : d.toLocaleString([], { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
   };
-  const bits = (c) => c ? [c.photos && `${c.photos} photo${c.photos > 1 ? "s" : ""}`, c.events && `${c.events} event${c.events > 1 ? "s" : ""}`, c.answers && `${c.answers} answer${c.answers > 1 ? "s" : ""}`, c.scripts && "script ready", c.films && "film rendered"].filter(Boolean).join(" · ") : "";
+  const bits = (c) => c ? [c.photos && `${c.photos} picture${c.photos > 1 ? "s" : ""}`, c.events && `${c.events} event${c.events > 1 ? "s" : ""}`, c.answers && `${c.answers} answer${c.answers > 1 ? "s" : ""}`, c.scripts && "script ready", c.films && "film rendered"].filter(Boolean).join(" · ") : "";
   const row = (x) => h("div", { class: "projitem" + (x.archivedAt ? " archived" : "") },
     h("a", { href: `#p=${x.id}`, class: "projrow" },
       x.cover ? h("img", { src: `files/${x.id}/thumbs/${encodeURIComponent(x.cover)}`, alt: "", loading: "lazy" }) : h("span", { class: "ph" }, "🎬"),
-      h("span", { class: "meta" }, h("b", {}, x.name, x.public ? h("span", { class: "tag ok", title: "Anyone with the link can watch" }, " 🌐 Public") : null), h("span", { class: "muted small" }, [x.archivedAt ? `Archived ${ago(x.archivedAt)}` : `Last saved ${ago(x.updatedAt)}`, bits(x.counts)].filter(Boolean).join(" · "))),
+      h("span", { class: "meta" }, h("b", {}, x.name, x.kind === "documentary" ? h("span", { class: "tag" }, " Documentary") : null, x.public ? h("span", { class: "tag ok", title: "Anyone with the link can watch" }, " 🌐 Public") : null), h("span", { class: "muted small" }, [x.archivedAt ? `Archived ${ago(x.archivedAt)}` : `Last saved ${ago(x.updatedAt)}`, bits(x.counts)].filter(Boolean).join(" · "))),
       h("span", { class: "go" }, x.archivedAt ? "Open →" : "Continue →")),
     x.counts
       ? h("div", { class: "rowacts" },
-          h("button", { class: "btn sm ghost", title: x.archivedAt ? "Move back to your biopics" : "Hide from this list; nothing is changed or deleted", onclick: () => setArchived(x.id, !x.archivedAt, renderHome) }, x.archivedAt ? "Unarchive" : "Archive"),
-          h("button", { class: "btn sm ghost danger", title: "Delete this biopic", onclick: () => deleteBiopic(x, renderHome) }, "Delete"))
+          h("button", { class: "btn sm ghost", title: x.archivedAt ? "Move back to your films" : "Hide from this list; nothing is changed or deleted", onclick: () => setArchived(x.id, !x.archivedAt, renderHome) }, x.archivedAt ? "Unarchive" : "Archive"),
+          h("button", { class: "btn sm ghost danger", title: "Delete this film project", onclick: () => deleteBiopic(x, renderHome) }, "Delete"))
       : null);
   const active = list.filter((x) => !x.archivedAt);
   const archived = list.filter((x) => x.archivedAt);
   fill(box, 
     ...(active.length
-      ? [h("h3", {}, "Your saved biopics — pick up where you left off"), ...active.map(row)]
-      : [h("p", { class: "muted small" }, archived.length ? "No active biopics. Your archived ones are below." : "No saved biopics yet.")]),
+      ? [h("h3", {}, "Your saved films — pick up where you left off"), ...active.map(row)]
+      : [h("p", { class: "muted small" }, archived.length ? "No active films. Your archived ones are below." : "No saved films yet.")]),
     archived.length ? h("details", { class: "fold", open: !active.length }, h("summary", {}, `Archived (${archived.length})`), ...archived.map(row)) : null,
     trash.length
       ? h("details", { class: "fold" }, h("summary", {}, `Recently deleted (${trash.length})`),
-          h("p", { class: "muted small" }, `Deleted biopics are kept for ${30} days, then removed for good.`),
+          h("p", { class: "muted small" }, `Deleted films are kept for ${30} days, then removed for good.`),
           ...trash.map((t) => h("div", { class: "projitem deleted" },
             h("div", { class: "projrow" }, h("span", { class: "ph" }, "🗑"),
               h("span", { class: "meta" }, h("b", {}, t.name), h("span", { class: "muted small" }, `Deleted ${ago(t.deletedAt)} · removed for good on ${new Date(t.purgeAt).toLocaleDateString([], { month: "short", day: "numeric" })}`))),
@@ -599,13 +645,13 @@ async function purgeDeleted(t) {
   }
 }
 
-async function newProject() {
-  const name = $("#newName").value.trim();
+async function newProject(kind = "biopic") {
+  const name = $(kind === "documentary" ? "#newDocName" : "#newName").value.trim();
   try {
-    const p = await api("POST", "api/projects", { name });
+    const p = await api("POST", "api/projects", { name, kind });
     P = p;
     remember(P);
-    location.hash = `p=${p.id}&s=person`;
+    location.hash = `p=${p.id}&s=${firstStep(p.kind)}`;
   } catch (e) {
     toast(e.message, true);
   }
@@ -1035,6 +1081,110 @@ function vPerson() {
   );
 }
 
+// ---------- documentary: 1. your story ----------
+/** A row of choice tiles (the same look as the tone picker). */
+function tiles(options, current, onPick) {
+  return h("div", { class: "tones", role: "radiogroup" },
+    ...options.map(([k, t, d]) => h("div", {
+      class: "tone" + (current === k ? " on" : ""), tabindex: 0, role: "radio", "aria-checked": current === k,
+      onclick: () => onPick(k), onkeydown: (e) => e.key === "Enter" && onPick(k),
+    }, h("div", { class: "t" }, t), h("div", { class: "d" }, d))));
+}
+
+function vStory() {
+  const st = P.story;
+  const set = (obj, now) => { Object.assign(P.story, obj); return patch({ story: obj }, now ? 0 : 500); };
+  const wc = (t) => String(t || "").split(/\s+/).filter(Boolean).length;
+  const count = h("span", { class: "muted small", id: "storyCount" }, `${wc(st.text)} words`);
+  const fileIn = h("input", { id: "storyFile", type: "file", accept: ".docx,.txt,.md,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain", hidden: true, onchange: async (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    if (st.text.trim() && !confirm("Replace the script below with the text of this file?")) return;
+    try {
+      await flush();
+      const fd = new FormData();
+      fd.append("file", f);
+      P = await api("POST", `api/projects/${P.id}/story/file`, fd, true);
+      render();
+      toast(`Loaded ${f.name}`);
+    } catch (er) { toast(er.message, true); }
+  } });
+  const sfield = (label, key, ph) => h("label", { class: "f" }, label,
+    h("input", { id: `st_${key}`, value: st[key] || "", placeholder: ph, oninput: (e) => set({ [key]: e.target.value }) }));
+  return h("section", {},
+    h("h1", {}, "Your story"),
+    h("p", { class: "lead" }, "Paste or upload your script. It can be finished narration or rough notes. BioPicker keeps your memories as you tell them, then researches the history around them and weaves it in."),
+    aiWarn(),
+    h("div", { class: "card grid2" },
+      h("label", { class: "f" }, "Working title",
+        h("input", { id: "st_title", value: P.person.name || "", placeholder: "The Summer of '65", oninput: (e) => { P.person.name = e.target.value; patch({ person: { name: e.target.value } }); } })),
+      sfield("What it's about, in a line", "about", "Two young brothers near the border in Ferozepur during the 1965 India–Pakistan war"),
+      sfield("When", "period", "1963–1966"),
+      sfield("Where", "place", "Ferozepur, Punjab, India"),
+    ),
+    h("div", { class: "card", style: "margin-top:14px" },
+      h("div", { class: "row" }, h("h2", { style: "margin:0" }, "Your script"), count, h("span", { class: "spacer" }),
+        h("button", { class: "btn sm", onclick: () => fileIn.click() }, "Upload Word or text file…"), fileIn),
+      h("textarea", { id: "storyText", rows: 16, style: "margin-top:10px", placeholder: "What happened, in your own words. Notes are fine: dates, places, who was there, what you saw and felt.",
+        oninput: (e) => { set({ text: e.target.value }); count.textContent = `${wc(e.target.value)} words`; } }, st.text || ""),
+      h("p", { class: "small muted", style: "margin-bottom:0" }, "Notes meant for an illustrator (like “render multiple panels…”) are left out of the narration automatically."),
+    ),
+    h("h2", { style: "margin-top:18px" }, "Who tells it?"),
+    tiles([
+      ["first", "Me, with a narrator", "Your memories in the first person (“I”, “my brother”), with a narrator for the history. You can give each its own voice."],
+      ["third", "A narrator", "One narrator tells your story and the history in the third person."],
+    ], st.telling, (k) => { set({ telling: k }, true); render(); }),
+    h("h2", { style: "margin-top:18px" }, "Your words"),
+    tiles([
+      ["keep", "Keep my words", "Your sentences as written (spelling fixed, notes left out). The film runs as long as it needs to."],
+      ["polish", "Polish them", "Your voice, facts and best lines, smoothed into narration that fits the length. Recommended for notes."],
+      ["notes", "Write from my notes", "Fresh narration written from your notes, keeping every fact."],
+    ], st.wording, (k) => { set({ wording: k }, true); render(); }),
+    h("p", { class: "small muted rules-note" }, "Every film is checked against our ", h("a", { href: "terms.html#rules", target: "_blank" }, "content rules"), " before it's made. War, hardship and hard history are fine to tell."),
+    nextBtn("media"),
+  );
+}
+
+// ---------- documentary: 3. background ----------
+function vResearch() {
+  const r = P.research;
+  const pick = (e, on) => { e.include = on; patch({ researchPicks: [{ id: e.id, include: on }] }); };
+  const busy = (P.jobs || []).some((j) => j.type === "research");
+  const ready = !!P.story?.text?.trim();
+  const chosen = r ? r.events.filter((e) => e.include !== false).length : 0;
+  return h("section", {},
+    h("h1", {}, "Background"),
+    h("p", { class: "lead" }, "The history around your story: the big picture, what happened near you, life on the home front, and how it ended. Untick anything you don't want in the film. The narrator's commentary is written from what's ticked."),
+    aiWarn(),
+    h("div", { class: "row", style: "margin-bottom:14px" },
+      h("button", { class: "btn primary", disabled: busy || !health.ai || !ready, onclick: async () => { await flush(); try { const j = await api("POST", `api/projects/${P.id}/research`); watchJob(j); updateJobUI(j); } catch (e) { toast(e.message, true); } } },
+        r ? "Research again" : "Research the background"),
+      ready ? null : h("span", { class: "muted small" }, "Add your script on the Your story step first."),
+      r ? h("span", { class: "muted small" }, `${chosen} of ${r.events.length} events chosen · AI-researched, so double-check anything you'll publish.`) : null),
+    r
+      ? h("div", { class: "hist" },
+          h("div", { class: "card" }, h("h3", {}, "Overview"), h("p", {}, r.overview)),
+          r.factChecks?.length
+            ? h("div", { class: "card factchecks" },
+                h("h3", {}, "Worth a second look in your script"),
+                h("p", { class: "small muted" }, "Places where historians tell it a little differently. Your memories are yours; these are only about the general history. The narrator won't repeat a claim as fact, but you may want to adjust your wording."),
+                h("ul", {}, ...r.factChecks.map((f) => h("li", {}, h("b", {}, `“${f.claim}”`), " ", f.note))))
+            : null,
+          ...r.events.map((e) =>
+            h("label", { class: "m pick" + (e.include === false ? " off" : "") },
+              h("input", { type: "checkbox", checked: e.include !== false, onchange: (ev) => { pick(e, ev.target.checked); ev.target.closest(".m").classList.toggle("off", !ev.target.checked); } }),
+              h("div", {},
+                h("h3", {}, `${e.date} · ${e.title} `, h("span", { class: "tag" }, e.scope)),
+                h("p", {}, e.description),
+                e.relevance ? h("p", { class: "inf" }, e.relevance) : null,
+                h("div", { class: "small muted" }, [e.archivalQuery && `🎞 footage: “${e.archivalQuery}”`, e.stillQuery && `📷 photo: “${e.stillQuery}”`, e.mapPlace && `🗺 ${e.mapPlace}`].filter(Boolean).join("   "))))))
+      : h("div", { class: "card muted" }, busy ? "Researching…" : "No research yet."),
+    h("div", { style: "height:14px" }),
+    nextBtn("style"),
+  );
+}
+
 // ---------- 2. media ----------
 function dropZone(label, accept, multiple, onFiles, id, onPick) {
   const input = h("input", { type: "file", accept, multiple, hidden: true, id });
@@ -1072,12 +1222,15 @@ function vMedia() {
     patch({ photos: [{ id, ...obj }] });
   };
   const dated = P.photos.filter((ph) => /^\d{4}/.test(ph.date || ""));
+  const doc = isDoc();
   return h("section", {},
-    h("h1", {}, "Photos & documents"),
-    h("p", { class: "lead" }, "Drop in photos (dates and GPS are read from their metadata) and documents — résumés, diplomas, obituaries, letters, articles (PDF, image or text). The AI reads them and suggests timeline events."),
-    h("div", { class: "grid2" },
+    h("h1", {}, doc ? "Pictures" : "Photos & documents"),
+    h("p", { class: "lead" }, doc
+      ? "Add the pictures for your film: illustrations you made from memory (for example with sketchArtist) and any real photographs. Pictures marked as illustrations carry a small “Illustration from memory” label in the film, so nobody mistakes them for photographs."
+      : "Drop in photos (dates and GPS are read from their metadata) and documents — résumés, diplomas, obituaries, letters, articles (PDF, image or text). The AI reads them and suggests timeline events."),
+    h("div", { class: doc ? "" : "grid2" },
       dropZone(native ? "📷  Tap to choose photos — their dates and places come along" : "📷  Drop photos here or click to choose (JPEG, PNG, WebP, HEIC)", "image/*", true, (f) => uploadFiles(`api/projects/${P.id}/photos`, "photos", f).catch((e) => toast(e.message, true)), "photoInput", native ? pickPhotosNative : null),
-      dropZone("📄  Drop documents here (PDF, image scans, .txt)", ".pdf,.txt,.md,.csv,.json,.html,image/*", true, (f) => uploadFiles(`api/projects/${P.id}/documents`, "docs", f).catch((e) => toast(e.message, true)), "docInput"),
+      doc ? null : dropZone("📄  Drop documents here (PDF, image scans, .txt)", ".pdf,.txt,.md,.csv,.json,.html,image/*", true, (f) => uploadFiles(`api/projects/${P.id}/documents`, "docs", f).catch((e) => toast(e.message, true)), "docInput"),
     ),
     h("p", { class: "small muted rules-note" }, "Only add photos and documents you have the right to use. No sexual, hateful, violent or harassing material; every film is checked against our ", h("a", { href: "terms.html#rules", target: "_blank" }, "content rules"), " before it's made."),
     P.documents.length
@@ -1101,8 +1254,8 @@ function vMedia() {
       : null,
     P.photos.length
       ? h("div", { style: "margin-top:18px" },
-          h("div", { class: "row" }, h("h2", {}, `Photos (${P.photos.length})`), h("span", { class: "spacer" }),
-            dated.length ? h("button", { class: "btn sm", onclick: () => photosToEvents() }, "Suggest timeline events from photo dates") : null),
+          h("div", { class: "row" }, h("h2", {}, `${doc ? "Pictures" : "Photos"} (${P.photos.length})`), h("span", { class: "spacer" }),
+            dated.length && !doc ? h("button", { class: "btn sm", onclick: () => photosToEvents() }, "Suggest timeline events from photo dates") : null),
           h("div", { class: "photos" },
             ...P.photos.map((ph) =>
               h("div", { class: "ph" + (ph.include === false ? " off" : "") },
@@ -1117,8 +1270,10 @@ function vMedia() {
                   h("div", { class: "row", style: "flex-wrap:nowrap" },
                     h("input", { value: ph.date || "", placeholder: ph.ai?.estimatedYearRange || "Date / year", oninput: (e) => photoPatch(ph.id, { date: e.target.value }) }),
                     h("input", { value: ph.place || "", placeholder: "Place", oninput: (e) => photoPatch(ph.id, { place: e.target.value }) })),
-                  h("select", { onchange: (e) => photoPatch(ph.id, { eventId: e.target.value || null }) },
-                    ...evOpts.map(([v, l]) => h("option", { value: v, selected: (ph.eventId || "") === v }, l))),
+                  doc
+                    ? h("label", { class: "small row", title: "Shows “Illustration from memory” on this picture in the film" }, h("input", { type: "checkbox", checked: !!ph.illustration, onchange: (e) => photoPatch(ph.id, { illustration: e.target.checked }) }), "Illustration, not a real photo")
+                    : h("select", { onchange: (e) => photoPatch(ph.id, { eventId: e.target.value || null }) },
+                        ...evOpts.map(([v, l]) => h("option", { value: v, selected: (ph.eventId || "") === v }, l))),
                   ph.ai ? h("div", { class: "ai" }, ph.ai.description) : null,
                   h("div", { class: "row" },
                     h("label", { class: "small muted row" }, h("input", { type: "checkbox", checked: ph.include !== false, onchange: (e) => { photoPatch(ph.id, { include: e.target.checked }); render(); } }), "use in film"),
@@ -1130,7 +1285,7 @@ function vMedia() {
           ))
       : null,
     h("div", { style: "height:14px" }),
-    nextBtn("timeline"),
+    nextBtn(doc ? "history" : "timeline"),
   );
 }
 
@@ -1290,13 +1445,20 @@ function vStyle() {
     const pitch = h("input", { type: "range", min: -20, max: 20, value: cur.pitch || 0, oninput: (e) => { pl.textContent = `${e.target.value}%`; }, onchange: (e) => set({ voice: { ...P.settings.voice, pitch: +e.target.value } }, true) });
     const rl = h("span", { class: "muted small" }, `${cur.rate || 0}%`);
     const pl = h("span", { class: "muted small" }, `${cur.pitch || 0}%`);
+    // documentaries told in the first person: the maker's memories can be read by a second voice
+    const two = isDoc() && P.story?.telling !== "third";
+    const sv = s.storyVoice || {};
+    const storySel = two ? h("select", { id: "storyVoiceSel", onchange: (e) => { const v = voices.find((x) => x.id === e.target.value); set({ storyVoice: v ? { provider: v.provider, id: v.id, label: v.label, rate: sv.rate || 0, pitch: sv.pitch || 0 } : null }, true); } },
+      h("option", { value: "" }, "— same as the narrator —"),
+      ...list.map((v) => h("option", { value: v.id, selected: v.id === sv.id }, `${v.label} · ${v.gender} · ${v.locale}${v.personality ? " · " + v.personality : ""}`))) : null;
     fill(voiceBox, 
       h("div", { class: "grid2" },
-        h("label", { class: "f full" }, "Narrator voice", sel),
+        h("label", { class: "f full" }, two ? "Narrator voice (the history and background)" : "Narrator voice", sel),
+        two ? h("label", { class: "f full" }, "Voice for your memories (the “I” parts)", storySel) : null,
         h("label", { class: "f" }, h("span", {}, "Pace ", rl), rate),
         h("label", { class: "f" }, h("span", {}, "Pitch ", pl), pitch),
         h("label", { class: "f" }, "Show", h("select", { id: "vfilter", onchange: drawVoices }, h("option", { value: "lang", selected: filter === "lang" }, "Voices for the narration language"), h("option", { value: "all", selected: filter === "all" }, "All voices (300+)"))),
-        h("label", { class: "f" }, "Preview line", h("input", { id: "pvText", value: `This is the story of ${P.person.preferredName || P.person.name || "a remarkable life"}.` })),
+        h("label", { class: "f" }, "Preview line", h("input", { id: "pvText", value: isDoc() ? "It was the summer everything changed." : `This is the story of ${P.person.preferredName || P.person.name || "a remarkable life"}.` })),
       ),
       h("div", { class: "row", style: "margin-top:10px" },
         h("button", { class: "btn", disabled: !s.voice?.id, onclick: async (e) => {
@@ -1304,6 +1466,11 @@ function vStyle() {
           try { const blob = await api("POST", "api/tts/preview", { voice: P.settings.voice, text: $("#pvText").value }); const a = new Audio(URL.createObjectURL(blob)); a.play(); } catch (er) { toast(er.message, true); }
           b.disabled = false;
         } }, "▶ Preview voice"),
+        two ? h("button", { class: "btn", disabled: !s.storyVoice?.id, onclick: async (e) => {
+          const b = e.currentTarget; b.disabled = true;
+          try { const blob = await api("POST", "api/tts/preview", { voice: P.settings.storyVoice, text: $("#pvText").value }); const a = new Audio(URL.createObjectURL(blob)); a.play(); } catch (er) { toast(er.message, true); }
+          b.disabled = false;
+        } }, "▶ Preview memories voice") : null,
         h("button", { class: "btn primary", disabled: !health.ai, onclick: async (e) => {
           const b = e.currentTarget; b.disabled = true; b.textContent = "Casting…";
           try { await flush(); P = await api("POST", `api/projects/${P.id}/voice/cast`); render(); toast(`Cast: ${P.settings.voice.label}`); } catch (er) { toast(er.message, true); b.disabled = false; }
@@ -1341,8 +1508,8 @@ function vStyle() {
       h("label", { class: "f" }, "Captions", h("select", { onchange: (e) => set({ burnCaptions: e.target.value === "1" }) }, h("option", { value: "0", selected: !s.burnCaptions }, "Separate .srt file only"), h("option", { value: "1", selected: s.burnCaptions }, "Burn into the video too"))),
     ),
     musicUp,
-    h("h2", { style: "margin-top:18px" }, "Documentary series"),
-    h("div", { class: "card" },
+    isDoc() ? null : h("h2", { style: "margin-top:18px" }, "Documentary series"),
+    isDoc() ? null : h("div", { class: "card" },
       h("p", { class: "muted small", style: "margin-top:0" }, "Besides the short and long films, BioPicker can make a multi-episode documentary: the AI splits the life into episodes (childhood, education, career…) and each episode becomes its own film. Plan it on the Script step."),
       h("div", { class: "grid3" },
         h("label", { class: "f" }, "Number of episodes", h("select", { onchange: (e) => set({ episodeCount: +e.target.value }) },
@@ -1378,8 +1545,8 @@ function scriptTabs() {
   return h("div", { class: "tabs" },
     tab("short", `Short · ${P.settings.shortSeconds}s`),
     tab("long", `Long · ${Math.round(P.settings.longSeconds / 60)} min`),
-    h("span", { class: "sep" }),
-    h("button", { class: scriptTab === "series" ? "on" : "", onclick: () => { scriptTab = "series"; render(); } }, "📺 Series plan"),
+    isDoc() ? null : h("span", { class: "sep" }),
+    isDoc() ? null : h("button", { class: scriptTab === "series" ? "on" : "", onclick: () => { scriptTab = "series"; render(); } }, "📺 Series plan"),
     ...episodes().map((e) => tab(`ep${e.n}`, `Ep ${e.n}`)));
 }
 
@@ -1439,6 +1606,7 @@ function seriesView() {
 }
 
 function vScript() {
+  if (isDoc() && !["short", "long"].includes(scriptTab)) scriptTab = "short";
   if (scriptTab === "series" || (scriptTab.startsWith("ep") && !episodes().some((e) => `ep${e.n}` === scriptTab))) {
     scriptTab = "series";
     return seriesView();
@@ -1461,10 +1629,13 @@ function vScript() {
       watchJob(j);
     } catch (e) { toast(e.message, true); }
   };
+  const twoVoices = isDoc() && P.story?.telling !== "third";
   const words = s ? s.scenes.reduce((a, sc) => a + (sc.narration || "").split(/\s+/).filter(Boolean).length, 0) : 0;
   return h("section", {},
     h("h1", {}, "Script & media"),
-    h("p", { class: "lead" }, "Claude writes the narration and picks the pictures: your photos, maps of each place, and public-domain newsreels, historic photos and art. Edit any line, swap any clip, then render."),
+    h("p", { class: "lead" }, isDoc()
+      ? "Claude builds the film from your script and the background you chose: your memories, the narrator's history between them, your pictures, maps, and public-domain newsreels and photos. Edit any line, switch who reads it, swap any clip, then render."
+      : "Claude writes the narration and picks the pictures: your photos, maps of each place, and public-domain newsreels, historic photos and art. Edit any line, swap any clip, then render."),
     aiWarn(),
     scriptTabs(),
     ep ? h("div", { class: "card" }, h("b", {}, `Episode ${ep.n}: ${ep.title}`), ep.from ? h("span", { class: "muted small" }, `  ·  ${ep.from}${ep.to && ep.to !== ep.from ? "–" + ep.to : ""}`) : null, h("div", { class: "muted small" }, ep.logline)) : null,
@@ -1487,6 +1658,9 @@ function vScript() {
             h("div", { class: "scene" },
               h("div", { class: "hd" },
                 h("b", {}, `${i + 1}.`), h("span", { class: "tag" }, sc.kind),
+                twoVoices ? h("select", { class: "who", title: "Who reads this scene", onchange: (e) => { sc.voice = e.target.value; saveSoon(); } },
+                  h("option", { value: "story", selected: sc.voice === "story" }, "🗣 Me"),
+                  h("option", { value: "narrator", selected: sc.voice !== "story" }, "🎙 Narrator")) : null,
                 h("input", { value: sc.onScreenTitle, placeholder: "On-screen title", oninput: (e) => { sc.onScreenTitle = e.target.value; saveSoon(); } }),
                 h("input", { value: sc.onScreenSubtitle, placeholder: "Subtitle", oninput: (e) => { sc.onScreenSubtitle = e.target.value; saveSoon(); } }),
                 h("button", { class: "btn sm danger", title: "Delete scene", onclick: () => { s.scenes.splice(i, 1); save(true); } }, "✕")),
@@ -1514,7 +1688,7 @@ function vScript() {
               ),
             ),
           ),
-          h("div", { class: "row" }, h("button", { class: "btn sm", onclick: () => { s.scenes.push({ kind: "life", narration: "", onScreenTitle: "", onScreenSubtitle: "", year: "", place: "", transition: "fade", visuals: [{ type: "card", ref: "New scene", caption: "" }] }); save(true); } }, "+ Add scene at the end")),
+          h("div", { class: "row" }, h("button", { class: "btn sm", onclick: () => { s.scenes.push({ kind: isDoc() ? "memory" : "life", voice: "narrator", narration: "", onScreenTitle: "", onScreenSubtitle: "", year: "", place: "", transition: "fade", visuals: [{ type: "card", ref: "New scene", caption: "" }] }); save(true); } }, "+ Add scene at the end")),
           h("p", { class: "muted small" }, "Added or changed visuals are looked up when you click “Re-find media” (or automatically at render time)."),
         )
       : h("div", { class: "card muted" }, busy ? "Writing…" : "No script yet for this version."),

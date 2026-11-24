@@ -690,7 +690,8 @@ async function pageBiopic(id) {
   header("biopic");
   const file = (dir, f) => `files/${encodeURIComponent(b.id)}/${dir}/${encodeURIComponent(f)}`;
   const P = b.person;
-  const facts = [["Goes by", P.preferredName], ["Born", [P.born, P.birthplace].filter(Boolean).join(", ")], ["Died", P.died], ["Nationality", P.nationality], ["Known for", P.occupation], ["Claim to fame", P.claimToFame], ["Personality", P.personality], ["Family", P.family], ["Legacy", P.legacy], ["Notes", P.notes], ["Language", P.language], ["Tone", b.settings.tone]].filter(([, v]) => v);
+  const S = b.story;
+  const facts = [...(S ? [["Kind", "Documentary from the maker's own script"], ["About", S.about], ["When", S.period], ["Where", S.place], ["Told by", S.telling === "third" ? "A narrator" : "The maker, with a narrator"]] : []), ["Goes by", P.preferredName], ["Born", [P.born, P.birthplace].filter(Boolean).join(", ")], ["Died", P.died], ["Nationality", P.nationality], ["Known for", P.occupation], ["Claim to fame", P.claimToFame], ["Personality", P.personality], ["Family", P.family], ["Legacy", P.legacy], ["Notes", P.notes], ["Language", P.language], ["Tone", b.settings.tone]].filter(([, v]) => v);
   const section = (title, count, ...kids) => h("details", { class: "card bp-sec", open: count ? true : null }, h("summary", {}, h("b", {}, title), h("span", { class: "muted small" }, ` ${count}`)), ...kids);
   fill(main,
     h("p", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); go({ tab: "biopics", id: null }); } }, "‹ All biopics")),
@@ -728,6 +729,7 @@ async function pageBiopic(id) {
       : h("div", { class: "state" }, "No films rendered yet."),
     h("h2", {}, "About the person"),
     facts.length ? h("div", { class: "card" }, h("dl", { class: "bp-facts" }, ...facts.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]))) : h("div", { class: "state" }, "Nothing filled in yet."),
+    S ? section("The maker's script", S.text ? 1 : 0, h("div", { class: "bp-story" }, S.text || "(empty)")) : null,
     section("Scripts", b.scripts.length, ...b.scripts.map((s) => h("div", { class: "bp-script" },
       h("h3", {}, `${s.label}: ${s.title || "untitled"}`), s.tagline ? h("p", { class: "muted" }, s.tagline) : null,
       h("ol", {}, ...s.scenes.map((sc) => h("li", {}, (sc.year || sc.place || sc.title) ? h("b", {}, [sc.year, sc.place, sc.title].filter(Boolean).join(" · ") + " — ") : null, sc.narration)))))),
