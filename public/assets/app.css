@@ -212,6 +212,9 @@ dialog.bp .row.end { margin-top: 14px; }
 .rowacts { display: flex; flex-direction: column; gap: 4px; }
 .rowacts.film { display: grid; grid-template-columns: auto auto; }
 .rowacts a.btn { text-align: center; text-decoration: none; }
+.saynames { margin-top: 12px; }
+.sayrow { display: grid; grid-template-columns: 1fr auto 1fr auto auto; gap: 8px; align-items: center; margin-bottom: 8px; }
+.sayrow input { min-width: 0; }
 video.watchvid { display: block; width: 100%; max-height: 65vh; background: #000; border-radius: 8px; }
 .btn.ghost.danger { color: var(--red); }
 .btn.danger-fill { background: var(--red); border-color: var(--red); color: #fff; }

@@ -1537,8 +1537,36 @@ function vStyle() {
         h("label", { class: "f" }, "Minutes per episode", h("input", { type: "number", min: 3, max: 30, value: Math.round((s.episodeSeconds || 600) / 60), onchange: (e) => set({ episodeSeconds: Math.max(3, Math.min(30, +e.target.value || 10)) * 60 }) })))),
     h("h2", { style: "margin-top:18px" }, "Narrator"),
     h("div", { class: "card" }, voiceBox),
+    sayNames(set),
     nextBtn("script"),
   );
+}
+
+/** "How to say names": respellings the voices read, so place and family names come out right; captions keep the real spelling. */
+function sayNames(set) {
+  const box = h("div", { class: "card saynames" });
+  const list = () => (P.settings.pronounce ||= []);
+  const save = (now) => set({ pronounce: list() }, now);
+  const hear = async (e, x) => {
+    const b = e.currentTarget;
+    const voice = P.settings.voice?.id ? P.settings.voice : P.settings.storyVoice;
+    if (!voice?.id) return toast("Choose a narrator voice first.", true);
+    b.disabled = true;
+    try { const blob = await api("POST", "api/tts/preview", { voice, text: x.word || x.say, pronounce: list() }); new Audio(URL.createObjectURL(blob)).play(); } catch (er) { toast(er.message, true); }
+    b.disabled = false;
+  };
+  const draw = () => fill(box,
+    h("h3", { style: "margin-top:0" }, "How to say names"),
+    h("p", { class: "small muted" }, "If a voice says a name wrongly, write it the way it sounds (for example Ferozepur → Feeroz-poor). Only the voices use this; titles and captions keep the real spelling. Press ▶ to hear it."),
+    ...list().map((x, i) => h("div", { class: "sayrow" },
+      h("input", { value: x.word, placeholder: "Name as written", "aria-label": "Name as written", oninput: (e) => { x.word = e.target.value; save(); } }),
+      h("span", { class: "muted", "aria-hidden": "true" }, "→"),
+      h("input", { value: x.say, placeholder: "Say it as", "aria-label": `Say ${x.word || "it"} as`, oninput: (e) => { x.say = e.target.value; save(); } }),
+      h("button", { class: "btn sm", title: "Hear it", "aria-label": `Hear ${x.word || "it"}`, onclick: (e) => hear(e, x) }, "▶"),
+      h("button", { class: "btn sm danger", title: "Remove", "aria-label": `Remove ${x.word || "this name"}`, onclick: () => { list().splice(i, 1); save(true); draw(); } }, "✕"))),
+    h("button", { class: "btn sm", onclick: () => { list().push({ word: "", say: "" }); draw(); box.querySelector(".sayrow:last-of-type input")?.focus(); } }, "+ Add a name"));
+  draw();
+  return box;
 }
 
 // ---------- 7. script ----------
@@ -1551,7 +1579,11 @@ function thumbFor(v) {
   }
   if (a?.kind === "image") return h("img", { class: "th", src: fileUrl("media", a.file), alt: "", loading: "lazy" });
   if (a?.kind === "video") return h("video", { class: "th", src: fileUrl("media", a.file), muted: true, preload: "metadata", onmouseenter: (e) => e.target.play(), onmouseleave: (e) => e.target.pause() });
-  if (a?.kind === "map") return h("div", { class: "th" }, "🗺 " + (a.label || ""));
+  if (a?.kind === "map") {
+    // say where each place was actually found, so a same-named village far away is easy to spot
+    const where = (a.marks || [a]).map((m) => `${m.label}: ${m.found || "?"}`).join("\n");
+    return h("div", { class: "th", title: `Found on the map:\n${where}` }, "🗺 " + (a.marks ? a.marks.map((m) => String(m.label).split(",")[0]).join(" · ") : a.label || ""));
+  }
   return h("div", { class: "th" }, { card: "🅣 title card", archival: "🎞 not found yet", still: "📷 not found yet", art: "🖼 not found yet", photo: "📷", map: "🗺" }[v.type] || v.type);
 }
 
@@ -1696,7 +1728,7 @@ function vScript() {
                 h("div", { class: "vi", style: "padding:8px;display:flex;flex-direction:column;gap:6px" },
                   h("select", { id: `nvT${i}` }, ...VIS_TYPES.map((t) => h("option", { value: t }, t))),
                   h("select", { id: `nvP${i}` }, h("option", { value: "" }, "(photo…)"), ...P.photos.filter((p) => p.include !== false).map((p) => h("option", { value: p.id }, (p.caption || p.originalName).slice(0, 40)))),
-                  h("input", { id: `nvR${i}`, placeholder: "search phrase / place / text" }),
+                  h("input", { id: `nvR${i}`, placeholder: "search phrase / place / text", title: "For a close-up map, list nearby places separated by ; (e.g. Ferozepur, Punjab, India; Hussainiwala, Punjab, India)" }),
                   h("button", { class: "btn sm", onclick: () => {
                     const type = $(`#nvT${i}`).value;
                     const ref = type === "photo" ? $(`#nvP${i}`).value : $(`#nvR${i}`).value.trim();

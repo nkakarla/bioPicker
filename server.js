@@ -18,7 +18,7 @@ import {
 } from "./lib/store.js";
 import { applyDocx, buildDocx, parseDocx, versionLabel } from "./lib/word.js";
 import { readZip, writeZip } from "./lib/zip.js";
-import { castingShortlist, listVoices, synthesize } from "./lib/tts.js";
+import { castingShortlist, listVoices, spokenText, synthesize } from "./lib/tts.js";
 import * as usage from "./lib/usage.js";
 import * as pay from "./lib/payments.js";
 import * as visits from "./lib/visits.js";
@@ -381,6 +381,12 @@ app.get("/api/projects/:id", wrap(async (req, res) => res.json(publicProject(P(r
 
 const PERSON_KEYS = Object.keys(emptyProject("x").person);
 const SETTING_KEYS = ["tone", "quality", "shortSeconds", "longSeconds", "voice", "storyVoice", "music", "burnCaptions", "includeArchival", "includeArt", "episodeCount", "episodeSeconds"];
+/** "How to say names": [{ word, say }] the voices read instead of the written spelling. */
+const cleanPronounce = (list) =>
+  (Array.isArray(list) ? list : [])
+    .map((x) => ({ word: String(x?.word || "").trim().slice(0, 60), say: String(x?.say || "").trim().slice(0, 80) }))
+    .filter((x) => x.word || x.say)
+    .slice(0, 40);
 const STORY_LIMITS = { about: 300, period: 100, place: 200, text: 60000, telling: 10, wording: 10 };
 
 app.patch("/api/projects/:id", wrap(async (req, res) => {
@@ -399,6 +405,7 @@ app.patch("/api/projects/:id", wrap(async (req, res) => {
   }
   if (b.settings) {
     for (const k of SETTING_KEYS) if (k in b.settings) p.settings[k] = b.settings[k];
+    if ("pronounce" in b.settings) p.settings.pronounce = cleanPronounce(b.settings.pronounce);
     p.settings.shortSeconds = Math.max(30, Math.min(300, Number(p.settings.shortSeconds) || 90));
     p.settings.longSeconds = Math.max(120, Math.min(1800, Number(p.settings.longSeconds) || 360));
     p.settings.episodeCount = Math.max(0, Math.min(20, Math.round(Number(p.settings.episodeCount) || 0)));
@@ -639,10 +646,10 @@ app.post("/api/projects/:id/voice/cast", wrap(async (req, res) => {
 
 const previewDir = ensureDir(path.join(DATA_DIR, "previews"));
 app.post("/api/tts/preview", wrap(async (req, res) => {
-  const { voice, text } = req.body || {};
+  const { voice, text, pronounce } = req.body || {};
   if (!voice?.id) throw Object.assign(new Error("voice required"), { status: 400 });
   const f = path.join(previewDir, `${newId(10)}.mp3`);
-  await synthesize(voice, String(text || "This is the story of a remarkable life.").slice(0, 400), f);
+  await synthesize(voice, spokenText(String(text || "This is the story of a remarkable life.").slice(0, 400), cleanPronounce(pronounce)), f);
   res.setHeader("Content-Type", "audio/mpeg");
   res.sendFile(f, () => fs.rm(f, { force: true }, () => {}));
 }));
